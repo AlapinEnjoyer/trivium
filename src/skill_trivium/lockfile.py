@@ -3,8 +3,8 @@ from pathlib import Path
 
 import tomli_w
 
-from trivium.models import InstallContext, LockfileData, SkillLockEntry
-from trivium.skills import utc_now
+from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry
+from skill_trivium.skills import utc_now
 
 
 def load_lockfile(lockfile_path: Path) -> LockfileData:

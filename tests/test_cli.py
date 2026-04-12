@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from trivium.cli import app
-from trivium.lockfile import load_lockfile
+from skill_trivium.cli import app
+from skill_trivium.lockfile import load_lockfile
 
 runner = CliRunner()
 

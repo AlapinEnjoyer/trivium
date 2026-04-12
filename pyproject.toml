@@ -1,5 +1,5 @@
 [project]
-name = "trivium"
+name = "skill-trivium"
 version = "0.1.0"
 description = "A minimal CLI for managing AI agent skills"
 readme = "README.md"
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-trv = "trivium.cli:main"
+trv = "skill_trivium.cli:main"
 
 [dependency-groups]
 dev = [

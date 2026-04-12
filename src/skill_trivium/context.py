@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from trivium.models import InstallContext
+from skill_trivium.models import InstallContext
 
 
 def find_git_root(start: Path | None = None) -> Path | None:

@@ -14,11 +14,11 @@ from rich.pretty import Pretty
 from rich.rule import Rule
 from rich.table import Table
 
-from trivium.context import ensure_storage, resolve_install_context
-from trivium.git import GitCloneError, cloned_repo
-from trivium.lockfile import ensure_lockfile, write_lockfile
-from trivium.models import InstallContext, ParsedSkill, SkillLockEntry, SourceUpdateResult, ValidationIssue
-from trivium.skills import (
+from skill_trivium.context import ensure_storage, resolve_install_context
+from skill_trivium.git import GitCloneError, cloned_repo
+from skill_trivium.lockfile import ensure_lockfile, write_lockfile
+from skill_trivium.models import InstallContext, ParsedSkill, SkillLockEntry, SourceUpdateResult, ValidationIssue
+from skill_trivium.skills import (
     build_skill_markdown,
     discover_skills_path,
     enumerate_skill_directories,
@@ -27,7 +27,7 @@ from trivium.skills import (
     validate_skill_directory,
     validate_skill_name,
 )
-from trivium.ui import console, make_panel, progress_bar, shorten_source, status_line, truncate_text
+from skill_trivium.ui import console, make_panel, progress_bar, shorten_source, status_line, truncate_text
 
 HELP_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 ADD_CONTEXT_SETTINGS = {**HELP_CONTEXT_SETTINGS, "allow_extra_args": True}

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from trivium.models import ParsedSkill, ValidationIssue
+from skill_trivium.models import ParsedSkill, ValidationIssue
 
 MAX_NAME_LENGTH = 64
 NAME_PATTERN = re.compile(r"^[a-z0-9]$|^[a-z0-9](?:[a-z0-9]|-(?!-)){0,62}[a-z0-9]$")
