@@ -3,7 +3,6 @@ import shutil
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import questionary
@@ -15,6 +14,7 @@ from rich.pretty import Pretty
 from rich.rule import Rule
 from rich.table import Table
 
+from skill_trivium import __version__
 from skill_trivium.context import ensure_storage, resolve_install_context
 from skill_trivium.git import GitCloneError, cloned_repo
 from skill_trivium.lockfile import ensure_lockfile, write_lockfile
@@ -43,12 +43,7 @@ app = typer.Typer(
 
 def version_callback(show_version: bool) -> None:
     if show_version:
-        try:
-            pkg_version = version("skill_trivium")
-        except PackageNotFoundError:
-            pkg_version = "unknown"
-
-        typer.echo(f"trivium {pkg_version}")
+        typer.echo(f"trivium {__version__}")
         raise typer.Exit()
 
 
@@ -100,7 +95,7 @@ def add(
 
     installed: list[str] = []
     would_install: list[str] = []
-    skipped: list[str] = []
+    skipped: dict[str, str] = {}
     failed: list[str] = []
     validation_issues: list[ValidationIssue] = []
 
@@ -173,9 +168,13 @@ def add(
                             repaired.append(parsed_skill.name)
                             for warning in parsed_skill.warnings:
                                 console.print(make_panel("warn", f"Conversion Warning: {parsed_skill.name}", [warning]))
-                        skipped.append(f"{parsed_skill.name} (already installed from the same source)")
+                        skipped[parsed_skill.name] = "already installed from the same source"
                         continue
                     conflicts.append((parsed_skill, existing))
+
+                # Stop the live display before printing conflict panels or
+                # prompting so Rich and Questionary do not compete for the terminal.
+                progress.stop()
 
                 if conflicts and not yes and not _is_interactive_terminal():
                     for parsed_skill, existing in conflicts:
@@ -187,7 +186,7 @@ def add(
                     for parsed_skill, _existing in conflicts:
                         pending_installs.append(parsed_skill)
                         replaced.append(parsed_skill.name)
-                        skipped = [item for item in skipped if not item.startswith(f"{parsed_skill.name} ")]
+                        skipped.pop(parsed_skill.name, None)
                 else:
                     for parsed_skill, existing in conflicts:
                         console.print(_conflict_panel(parsed_skill, existing, url, commit_hash))
@@ -199,9 +198,9 @@ def add(
                             pending_installs.append(parsed_skill)
                             replaced.append(parsed_skill.name)
                         elif choice == "Skip":
-                            skipped.append(f"{parsed_skill.name} (skipped)")
+                            skipped[parsed_skill.name] = "skipped"
                         else:
-                            skipped.append(f"{parsed_skill.name} (kept existing)")
+                            skipped[parsed_skill.name] = "kept existing"
 
                 for parsed_skill in pending_installs:
                     installed_at = utc_now()
@@ -596,11 +595,16 @@ def _entry_from_skill(
     )
 
 
-def _summary_lines(installed: list[str], would_install: list[str], skipped: list[str], failed: list[str]) -> list[str]:
+def _summary_lines(
+    installed: list[str],
+    would_install: list[str],
+    skipped: dict[str, str],
+    failed: list[str],
+) -> list[str]:
     lines: list[str] = []
     lines.extend(f"Installed: {name}" for name in sorted(installed))
     lines.extend(f"Would install: {name}" for name in sorted(would_install))
-    lines.extend(f"Skipped: {name}" for name in sorted(skipped))
+    lines.extend(f"Skipped: {name} ({reason})" for name, reason in sorted(skipped.items()))
     lines.extend(f"Failed: {name}" for name in sorted(set(failed)))
     return lines
 
@@ -687,15 +691,18 @@ def _confirm(prompt: str) -> bool:
     if _is_interactive_terminal():
         return bool(questionary.confirm(prompt, default=False).ask())
 
-    response = sys.stdin.readline().strip().lower()
-    return response in {"y", "yes"}
+    response = sys.stdin.readline()
+    if not response:
+        console.print(make_panel("warn", "No Input", ["stdin reached EOF; treating as 'no'."]))
+        return False
+    return response.strip().lower() in {"y", "yes"}
 
 
 def _validate_init_name(skill_name: str) -> ValidationIssue | None:
     issues = validate_skill_name(skill_name, skill_name=skill_name)
     if not issues:
         return None
-    return issues[0] if issues else None
+    return issues[0]
 
 
 def _update_source_group(

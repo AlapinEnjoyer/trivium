@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import skill_trivium.cli as cli_module
 from skill_trivium.cli import app
 from skill_trivium.lockfile import load_lockfile
 from skill_trivium.skills import parse_skill_document
@@ -27,6 +28,13 @@ def test_short_help_flag_works_on_root_and_subcommand() -> None:
     assert init_result.exit_code == 0, init_result.output
     assert "Usage:" in root_result.output
     assert "Usage:" in init_result.output
+
+
+def test_version_flag_shows_version() -> None:
+    result = runner.invoke(app, ["--version"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("trivium ")
 
 
 def test_init_without_required_argument_shows_help() -> None:
@@ -263,6 +271,68 @@ def test_add_conflict_with_yes_replaces_existing_skill(
     assert lockfile.skills["shared-skill"].source_url == str(incoming_repo)
 
 
+def test_add_stops_progress_before_interactive_conflict_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing_repo = create_git_skill_repo(
+        tmp_path / "existing",
+        {"shared-skill": skill_markdown("shared-skill", "Existing source")},
+    )
+    incoming_repo = create_git_skill_repo(
+        tmp_path / "incoming",
+        {"shared-skill": skill_markdown("shared-skill", "Incoming source")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    first = runner.invoke(app, ["add", str(existing_repo), "--all"])
+    assert first.exit_code == 0, first.output
+
+    class FakeProgress:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def __enter__(self) -> "FakeProgress":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def add_task(self, description: str, total: object = None) -> int:
+            return 1
+
+        def update(self, task_id: int, completed: int) -> None:
+            return None
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    progress = FakeProgress()
+
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli_module, "progress_bar", lambda: progress)
+
+    def fake_select(message: str, choices: list[str]) -> object:
+        assert progress.stopped
+        assert message == "Resolve conflict for 'shared-skill'"
+        assert choices == ["Keep existing", "Replace with new", "Skip"]
+
+        class Prompt:
+            def ask(self) -> str:
+                return "Keep existing"
+
+        return Prompt()
+
+    monkeypatch.setattr(cli_module.questionary, "select", fake_select)
+
+    result = runner.invoke(app, ["add", str(incoming_repo), "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert progress.stopped
+    assert "Skipped: shared-skill (kept existing)" in result.output
+
+
 def test_add_same_source_readd_is_noop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -456,6 +526,24 @@ def test_remove_reads_yes_from_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     assert result.exit_code == 0, result.output
     assert not (project_root / ".agents" / "skills" / "alpha-skill").exists()
+
+
+def test_remove_eof_from_stdin_warns_and_cancels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"alpha-skill": skill_markdown("alpha-skill", "Alpha")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert add_result.exit_code == 0, add_result.output
+
+    result = runner.invoke(app, ["remove", "--all"], input="")
+
+    assert result.exit_code == 0, result.output
+    assert "No Input" in result.output
+    assert "Remove Cancelled" in result.output
+    assert (project_root / ".agents" / "skills" / "alpha-skill").exists()
 
 
 def test_update_refreshes_skill_from_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

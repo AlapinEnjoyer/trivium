@@ -1,8 +1,10 @@
 from importlib.metadata import PackageNotFoundError, version
 
+_DISTRIBUTION_NAME = "skill-trivium"
+
 try:
-    __version__ = version("trivium")
+    __version__ = version(_DISTRIBUTION_NAME)
 except PackageNotFoundError:
-    __version__ = "0.1.0"
+    __version__ = "unknown"
 
 __all__ = ["__version__"]

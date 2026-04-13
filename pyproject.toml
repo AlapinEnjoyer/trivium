@@ -1,6 +1,10 @@
+[build-system]
+requires = ["uv_build>=0.10.7,<0.12.0"]
+build-backend = "uv_build"
+
 [project]
 name = "skill-trivium"
-version = "0.1.2"
+version = "0.1.3"
 description = "A minimal CLI for managing AI agent skills"
 readme = "README.md"
 authors = [
@@ -15,6 +19,11 @@ dependencies = [
     "typer>=0.24.1,<0.25.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/AlapinEnjoyer/trivium"
+Repository = "https://github.com/AlapinEnjoyer/trivium"
+Issues = "https://github.com/AlapinEnjoyer/trivium/issues"
+
 [project.scripts]
 trv = "skill_trivium.cli:main"
 
@@ -23,10 +32,6 @@ dev = [
     "pytest>=8.4.2,<9.0.0",
     "twine>=6.2.0,<7.0.0",
 ]
-
-[build-system]
-requires = ["uv_build>=0.10.7,<0.12.0"]
-build-backend = "uv_build"
 
 [tool.ruff]
 target-version = "py313"
