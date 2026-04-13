@@ -76,6 +76,13 @@ def parse_skill_document(skill_file: Path) -> tuple[dict[str, object], str]:
     return normalized, body
 
 
+def write_skill_document(skill_file: Path, frontmatter: dict[str, object], body: str) -> None:
+    frontmatter_text = yaml.dump(frontmatter, sort_keys=False, allow_unicode=False, default_flow_style=False)
+    normalized_body = body.lstrip("\n")
+    content = f"---\n{frontmatter_text}---\n\n{normalized_body}" if normalized_body else f"---\n{frontmatter_text}---\n"
+    skill_file.write_text(content, encoding="utf-8")
+
+
 def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[ValidationIssue]]:
     issues: list[ValidationIssue] = []
     skill_name = skill_dir.name
@@ -103,6 +110,8 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
         )
         return None, issues
 
+    normalized_frontmatter = dict(frontmatter)
+
     name = frontmatter.get("name")
     issues.extend(validate_skill_name(name, skill_name=skill_name, expected_directory=skill_dir.name))
 
@@ -117,6 +126,7 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
         )
     else:
         stripped_description = description.strip()
+        normalized_frontmatter["description"] = stripped_description
         if not stripped_description:
             issues.append(
                 ValidationIssue(
@@ -147,11 +157,34 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
         issues=issues,
         max_length=500,
     )
+
+    # Process allowed-tools to accept a YAML list of strings
+    raw_allowed_tools = frontmatter.get("allowed-tools")
+    skill_warnings: list[str] = []
+    if isinstance(raw_allowed_tools, list):
+        if all(isinstance(item, str) for item in raw_allowed_tools):
+            normalized = " ".join(item.strip() for item in raw_allowed_tools if item.strip())
+            skill_warnings.append(
+                f"'allowed-tools' was a YAML list and has been converted to a space-separated string: \"{normalized}\""
+            )
+            raw_allowed_tools = normalized
+            normalized_frontmatter["allowed-tools"] = normalized
+        else:
+            issues.append(
+                ValidationIssue(
+                    skill_name=skill_name,
+                    field="allowed-tools",
+                    rule="The 'allowed-tools' list must contain only strings.",
+                )
+            )
+            raw_allowed_tools = None
+
     allowed_tools = _validate_optional_string(
-        frontmatter.get("allowed-tools"),
+        raw_allowed_tools,
         skill_name=skill_name,
         field="allowed-tools",
         issues=issues,
+        type_error_msg="The 'allowed-tools' field must be a space-separated string or a list of strings if present.",
     )
 
     metadata = frontmatter.get("metadata")
@@ -183,6 +216,16 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
     if issues:
         return None, issues
 
+    normalized_frontmatter["name"] = str(name).strip()
+    if license_value is not None:
+        normalized_frontmatter["license"] = license_value
+    if compatibility is not None:
+        normalized_frontmatter["compatibility"] = compatibility
+    if allowed_tools is not None:
+        normalized_frontmatter["allowed-tools"] = allowed_tools
+    if normalized_metadata is not None:
+        normalized_frontmatter["metadata"] = normalized_metadata
+
     return (
         ParsedSkill(
             directory=skill_dir,
@@ -192,6 +235,9 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
             compatibility=compatibility,
             allowed_tools=allowed_tools,
             metadata=normalized_metadata,
+            frontmatter=normalized_frontmatter,
+            body=body,
+            warnings=tuple(skill_warnings),
         ),
         issues,
     )
@@ -280,15 +326,13 @@ def _validate_optional_string(
     field: str,
     issues: list[ValidationIssue],
     max_length: int | None = None,
+    type_error_msg: str | None = None,
 ) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        issues.append(
-            ValidationIssue(
-                skill_name=skill_name, field=field, rule=f"The '{field}' field must be a string if present."
-            )
-        )
+        rule_msg = type_error_msg or f"The '{field}' field must be a string if present."
+        issues.append(ValidationIssue(skill_name=skill_name, field=field, rule=rule_msg))
         return None
 
     stripped = value.strip()

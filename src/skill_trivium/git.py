@@ -27,7 +27,7 @@ def cloned_repo(source_url: str) -> Iterator[tuple[Path, str]]:
 
 def clone_repository(source_url: str, destination: Path) -> None:
     result = subprocess.run(
-        ["git", "clone", "--quiet", source_url, str(destination)],
+        ["git", "clone", "--depth", "1", "--single-branch", "--quiet", source_url, str(destination)],
         capture_output=True,
         text=True,
         check=False,

@@ -3,6 +3,7 @@ import shutil
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import questionary
@@ -26,6 +27,7 @@ from skill_trivium.skills import (
     utc_now,
     validate_skill_directory,
     validate_skill_name,
+    write_skill_document,
 )
 from skill_trivium.ui import console, make_panel, progress_bar, shorten_source, status_line, truncate_text
 
@@ -37,6 +39,31 @@ app = typer.Typer(
     context_settings=HELP_CONTEXT_SETTINGS,
     no_args_is_help=True,
 )
+
+
+def version_callback(show_version: bool) -> None:
+    if show_version:
+        try:
+            pkg_version = version("skill_trivium")
+        except PackageNotFoundError:
+            pkg_version = "unknown"
+
+        typer.echo(f"trivium {pkg_version}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main_callback(
+    version_flag: bool = typer.Option(
+        None,
+        "--version",
+        "-V",
+        help="Show the application's version and exit.",
+        callback=version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    pass
 
 
 @app.command(context_settings=ADD_CONTEXT_SETTINGS, no_args_is_help=True)
@@ -133,12 +160,19 @@ def add(
 
                 pending_installs: list[ParsedSkill] = []
                 conflicts: list[tuple[ParsedSkill, SkillLockEntry]] = []
+                repaired: list[str] = []
                 for parsed_skill in parsed_skills:
                     existing = lockfile.skills.get(parsed_skill.name)
                     if existing is None:
                         pending_installs.append(parsed_skill)
                         continue
                     if existing.source_url == url:
+                        if not dry_run and _repair_installed_skill_if_needed(
+                            parsed_skill, context.install_path_for(parsed_skill.name)
+                        ):
+                            repaired.append(parsed_skill.name)
+                            for warning in parsed_skill.warnings:
+                                console.print(make_panel("warn", f"Conversion Warning: {parsed_skill.name}", [warning]))
                         skipped.append(f"{parsed_skill.name} (already installed from the same source)")
                         continue
                     conflicts.append((parsed_skill, existing))
@@ -183,7 +217,9 @@ def add(
                         would_install.append(parsed_skill.name)
                         continue
                     destination = context.install_path_for(parsed_skill.name)
-                    _replace_tree(parsed_skill.directory, destination)
+                    _install_skill_tree(parsed_skill, destination)
+                    for warning in parsed_skill.warnings:
+                        console.print(make_panel("warn", f"Conversion Warning: {parsed_skill.name}", [warning]))
                     lockfile.skills[parsed_skill.name] = entry
                     installed.append(parsed_skill.name)
 
@@ -196,6 +232,17 @@ def add(
                             "info",
                             "Conflicts Replaced",
                             [f"Replaced skill '{name}' with the incoming source." for name in sorted(replaced)],
+                        )
+                    )
+                if repaired:
+                    console.print(
+                        make_panel(
+                            "info",
+                            "Normalized Installed Skills",
+                            [
+                                f"Rewrote installed SKILL.md for '{name}' to match normalized metadata."
+                                for name in repaired
+                            ],
                         )
                     )
         except GitCloneError as error:
@@ -564,6 +611,20 @@ def _replace_tree(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination)
 
 
+def _install_skill_tree(parsed_skill: ParsedSkill, destination: Path) -> None:
+    _replace_tree(parsed_skill.directory, destination)
+    write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
+
+
+def _repair_installed_skill_if_needed(parsed_skill: ParsedSkill, destination: Path) -> bool:
+    if not parsed_skill.warnings:
+        return False
+    if not destination.is_dir():
+        return False
+    write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
+    return True
+
+
 def _conflict_panel(
     parsed_skill: ParsedSkill,
     existing: SkillLockEntry,
@@ -673,6 +734,13 @@ def _update_source_group(
                     result.validation_issues.extend(issues)
                     continue
                 if commit_hash == entry.commit_hash:
+                    if not dry_run:
+                        try:
+                            if _repair_installed_skill_if_needed(parsed_skill, context.install_path_for(entry.name)):
+                                for warning in parsed_skill.warnings:
+                                    result.warnings.append((parsed_skill.name, warning))
+                        except OSError as error:
+                            result.errors.append(f"{entry.name}: {error}")
                     continue
 
                 updated_entry = SkillLockEntry(
@@ -691,7 +759,9 @@ def _update_source_group(
                 if not dry_run:
                     try:
                         ensure_storage(context)
-                        _replace_tree(skill_dir, context.install_path_for(entry.name))
+                        _install_skill_tree(parsed_skill, context.install_path_for(entry.name))
+                        for warning in parsed_skill.warnings:
+                            result.warnings.append((parsed_skill.name, warning))
                     except OSError as error:
                         result.errors.append(f"{entry.name}: {error}")
                         continue

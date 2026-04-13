@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from skill_trivium.cli import app
 from skill_trivium.lockfile import load_lockfile
+from skill_trivium.skills import parse_skill_document
 
 runner = CliRunner()
 
@@ -166,6 +167,53 @@ def test_add_skips_invalid_skill_but_installs_valid_ones(
     assert "Validation Failed: bad-skill" in result.output
 
 
+def test_add_normalizes_yaml_list_allowed_tools_in_installed_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "learn": "\n".join(
+                [
+                    "---",
+                    "name: learn",
+                    "preamble-tier: 2",
+                    'version: "1.0.0"',
+                    "description: |",
+                    "  Manage project learnings.",
+                    "allowed-tools:",
+                    "  - Bash",
+                    "  - Read",
+                    "  - Write",
+                    "---",
+                    "",
+                    "## Instructions",
+                    "",
+                    "Use this skill carefully.",
+                ]
+            )
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert "Conversion Warning: learn" in result.output
+
+    installed_path = project_root / ".agents" / "skills" / "learn" / "SKILL.md"
+    frontmatter, _ = parse_skill_document(installed_path)
+    assert frontmatter["preamble-tier"] == 2
+    assert frontmatter["version"] == "1.0.0"
+    assert frontmatter["allowed-tools"] == "Bash Read Write"
+    assert not isinstance(frontmatter["allowed-tools"], list)
+
+    lockfile = load_lockfile(project_root / "skills.lock")
+    assert lockfile.skills["learn"].allowed_tools == "Bash Read Write"
+
+
 def test_add_conflict_without_yes_exits_four_in_non_interactive_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -235,6 +283,70 @@ def test_add_same_source_readd_is_noop(
     assert second.exit_code == 0, second.output
     assert "already installed from the same source" in second.output
     assert load_lockfile(project_root / "skills.lock").skills["repeat-skill"].commit_hash == initial_commit
+
+
+def test_add_same_source_readd_repairs_installed_skill_frontmatter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "learn": "\n".join(
+                [
+                    "---",
+                    "name: learn",
+                    "preamble-tier: 2",
+                    'version: "1.0.0"',
+                    "description: |",
+                    "  Manage project learnings.",
+                    "allowed-tools:",
+                    "  - Bash",
+                    "  - Read",
+                    "---",
+                    "",
+                    "## Instructions",
+                    "",
+                    "Use this skill carefully.",
+                ]
+            )
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    first = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert first.exit_code == 0, first.output
+
+    installed_path = project_root / ".agents" / "skills" / "learn" / "SKILL.md"
+    write_skill(
+        installed_path,
+        "\n".join(
+            [
+                "---",
+                "name: learn",
+                "preamble-tier: 2",
+                'version: "1.0.0"',
+                "description: |",
+                "  Manage project learnings.",
+                "allowed-tools:",
+                "  - Bash",
+                "  - Read",
+                "---",
+                "",
+                "## Instructions",
+                "",
+                "Use this skill carefully.",
+            ]
+        ),
+    )
+
+    second = runner.invoke(app, ["add", str(remote_repo), "--all"])
+
+    assert second.exit_code == 0, second.output
+    frontmatter, _ = parse_skill_document(installed_path)
+    assert frontmatter["allowed-tools"] == "Bash Read"
+    assert not isinstance(frontmatter["allowed-tools"], list)
 
 
 def test_list_shows_installed_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

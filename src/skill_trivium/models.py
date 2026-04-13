@@ -98,6 +98,9 @@ class ParsedSkill:
     compatibility: str | None = None
     allowed_tools: str | None = None
     metadata: dict[str, str] | None = None
+    frontmatter: dict[str, object] = field(default_factory=dict)
+    body: str = ""
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
