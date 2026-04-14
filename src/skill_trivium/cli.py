@@ -23,6 +23,8 @@ from skill_trivium.skills import (
     build_skill_markdown,
     discover_skills_path,
     enumerate_skill_directories,
+    hash_parsed_skill,
+    hash_skill_directory,
     parse_skill_document,
     utc_now,
     validate_skill_directory,
@@ -319,6 +321,7 @@ def update(
     auth_failure = False
     general_errors = False
     warning_count = 0
+    lockfile_changed = False
 
     for result in sorted(results, key=lambda item: item.source_url):
         for skill_name, warning in result.warnings:
@@ -341,6 +344,10 @@ def update(
             console.print(make_panel("err", "Update Failed", [error]))
         auth_failure = auth_failure or result.auth_failure
 
+        for skill_name, refreshed_entry in sorted(result.refreshed.items()):
+            lockfile.skills[skill_name] = refreshed_entry
+            lockfile_changed = True
+
         if dry_run:
             updated_names.extend(sorted(result.updated))
             continue
@@ -348,8 +355,9 @@ def update(
         for skill_name, new_entry in sorted(result.updated.items()):
             lockfile.skills[skill_name] = new_entry
             updated_names.append(skill_name)
+            lockfile_changed = True
 
-    if updated_names and not dry_run:
+    if lockfile_changed and not dry_run:
         write_lockfile(context, lockfile)
 
     if dry_run and updated_names:
@@ -584,6 +592,7 @@ def _entry_from_skill(
         name=parsed_skill.name,
         source_url=source_url,
         commit_hash=commit_hash,
+        content_hash=hash_parsed_skill(parsed_skill),
         skills_path=skills_path,
         install_path=context.relative_install_path(parsed_skill.name),
         description=parsed_skill.description,
@@ -627,6 +636,36 @@ def _repair_installed_skill_if_needed(parsed_skill: ParsedSkill, destination: Pa
         return False
     write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
     return True
+
+
+def _entry_needs_refresh(entry: SkillLockEntry, parsed_skill: ParsedSkill, destination: Path) -> bool:
+    expected_hash = hash_parsed_skill(parsed_skill)
+    if entry.content_hash is None:
+        if not destination.is_dir():
+            return True
+        return hash_skill_directory(destination) != expected_hash
+    if expected_hash != entry.content_hash:
+        return True
+    return not destination.is_dir()
+
+
+def _refreshed_entry(
+    entry: SkillLockEntry, parsed_skill: ParsedSkill, context: InstallContext, commit_hash: str
+) -> SkillLockEntry:
+    return SkillLockEntry(
+        name=parsed_skill.name,
+        source_url=entry.source_url,
+        commit_hash=commit_hash,
+        content_hash=hash_parsed_skill(parsed_skill),
+        skills_path=entry.skills_path,
+        install_path=context.relative_install_path(parsed_skill.name),
+        description=parsed_skill.description,
+        license=parsed_skill.license,
+        compatibility=parsed_skill.compatibility,
+        allowed_tools=parsed_skill.allowed_tools,
+        installed_at=entry.installed_at,
+        metadata=parsed_skill.metadata,
+    )
 
 
 def _conflict_panel(
@@ -740,7 +779,7 @@ def _update_source_group(
                 if issues:
                     result.validation_issues.extend(issues)
                     continue
-                if commit_hash == entry.commit_hash:
+                if not _entry_needs_refresh(entry, parsed_skill, context.install_path_for(entry.name)):
                     if not dry_run:
                         try:
                             if _repair_installed_skill_if_needed(parsed_skill, context.install_path_for(entry.name)):
@@ -748,21 +787,12 @@ def _update_source_group(
                                     result.warnings.append((parsed_skill.name, warning))
                         except OSError as error:
                             result.errors.append(f"{entry.name}: {error}")
+                            continue
+                    if entry.content_hash is None or entry.commit_hash != commit_hash:
+                        result.refreshed[entry.name] = _refreshed_entry(entry, parsed_skill, context, commit_hash)
                     continue
 
-                updated_entry = SkillLockEntry(
-                    name=parsed_skill.name,
-                    source_url=source_url,
-                    commit_hash=commit_hash,
-                    skills_path=entry.skills_path,
-                    install_path=context.relative_install_path(parsed_skill.name),
-                    description=parsed_skill.description,
-                    license=parsed_skill.license,
-                    compatibility=parsed_skill.compatibility,
-                    allowed_tools=parsed_skill.allowed_tools,
-                    installed_at=entry.installed_at,
-                    metadata=parsed_skill.metadata,
-                )
+                updated_entry = _refreshed_entry(entry, parsed_skill, context, commit_hash)
                 if not dry_run:
                     try:
                         ensure_storage(context)

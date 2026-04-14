@@ -29,6 +29,7 @@ class SkillLockEntry:
     install_path: str
     description: str
     installed_at: str
+    content_hash: str | None = None
     license: str | None = None
     compatibility: str | None = None
     allowed_tools: str | None = None
@@ -47,6 +48,7 @@ class SkillLockEntry:
             name=name,
             source_url=str(data.get("source_url", "")),
             commit_hash=str(data.get("commit_hash", "")),
+            content_hash=_optional_string(data.get("content_hash")),
             skills_path=str(data.get("skills_path", ".")),
             install_path=str(data.get("install_path", "")),
             description=str(data.get("description", "")),
@@ -66,6 +68,8 @@ class SkillLockEntry:
             "description": self.description,
             "installed_at": self.installed_at,
         }
+        if self.content_hash is not None:
+            data["content_hash"] = self.content_hash
         if self.license is not None:
             data["license"] = self.license
         if self.compatibility is not None:
@@ -114,6 +118,7 @@ class ValidationIssue:
 class SourceUpdateResult:
     source_url: str
     commit_hash: str | None = None
+    refreshed: dict[str, SkillLockEntry] = field(default_factory=dict)
     updated: dict[str, SkillLockEntry] = field(default_factory=dict)
     warnings: list[tuple[str, str]] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)

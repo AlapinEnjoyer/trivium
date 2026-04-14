@@ -1,5 +1,6 @@
 import re
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 
 import yaml
@@ -76,11 +77,39 @@ def parse_skill_document(skill_file: Path) -> tuple[dict[str, object], str]:
     return normalized, body
 
 
-def write_skill_document(skill_file: Path, frontmatter: dict[str, object], body: str) -> None:
+def render_skill_document(frontmatter: dict[str, object], body: str) -> str:
     frontmatter_text = yaml.dump(frontmatter, sort_keys=False, allow_unicode=False, default_flow_style=False)
     normalized_body = body.lstrip("\n")
-    content = f"---\n{frontmatter_text}---\n\n{normalized_body}" if normalized_body else f"---\n{frontmatter_text}---\n"
-    skill_file.write_text(content, encoding="utf-8")
+    return f"---\n{frontmatter_text}---\n\n{normalized_body}" if normalized_body else f"---\n{frontmatter_text}---\n"
+
+
+def write_skill_document(skill_file: Path, frontmatter: dict[str, object], body: str) -> None:
+    skill_file.write_text(render_skill_document(frontmatter, body), encoding="utf-8")
+
+
+def hash_skill_directory(skill_dir: Path, *, skill_document: str | None = None) -> str:
+    digest = sha256()
+    for path in sorted(skill_dir.rglob("*"), key=lambda item: item.relative_to(skill_dir).as_posix()):
+        if path.is_dir():
+            continue
+
+        relative_path = path.relative_to(skill_dir).as_posix()
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        if relative_path == "SKILL.md" and skill_document is not None:
+            digest.update(skill_document.encode("utf-8"))
+        else:
+            digest.update(path.read_bytes())
+        digest.update(b"\0")
+
+    return digest.hexdigest()
+
+
+def hash_parsed_skill(parsed_skill: ParsedSkill) -> str:
+    return hash_skill_directory(
+        parsed_skill.directory,
+        skill_document=render_skill_document(parsed_skill.frontmatter, parsed_skill.body),
+    )
 
 
 def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[ValidationIssue]]:

@@ -594,6 +594,68 @@ def test_update_dry_run_exits_three_when_changes_exist(tmp_path: Path, monkeypat
     assert entry.description == "Original description"
 
 
+def test_update_only_reinstalls_changed_skill_from_shared_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "alpha-skill": skill_markdown("alpha-skill", "Alpha v1"),
+            "beta-skill": skill_markdown("beta-skill", "Beta v1"),
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert add_result.exit_code == 0, add_result.output
+
+    beta_installed = project_root / ".agents" / "skills" / "beta-skill" / "SKILL.md"
+    sentinel = "\n<!-- local beta marker -->\n"
+    beta_installed.write_text(beta_installed.read_text(encoding="utf-8") + sentinel, encoding="utf-8")
+
+    write_skill(remote_repo / "alpha-skill" / "SKILL.md", skill_markdown("alpha-skill", "Alpha v2"))
+    git_commit(remote_repo, "Update alpha only")
+
+    result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 0, result.output
+    assert "Updated skill 'alpha-skill'." in result.output
+    assert "Updated skill 'beta-skill'." not in result.output
+    assert sentinel in beta_installed.read_text(encoding="utf-8")
+    assert "Alpha v2" in (project_root / ".agents" / "skills" / "alpha-skill" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_update_without_content_hash_only_refreshes_lockfile_for_unchanged_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"alpha-skill": skill_markdown("alpha-skill", "Original description")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert add_result.exit_code == 0, add_result.output
+
+    lockfile_path = project_root / "skills.lock"
+    original_lockfile = lockfile_path.read_text(encoding="utf-8")
+    assert "content_hash" in original_lockfile
+    without_hash = "\n".join(line for line in original_lockfile.splitlines() if "content_hash" not in line) + "\n"
+    lockfile_path.write_text(without_hash, encoding="utf-8")
+
+    installed_path = project_root / ".agents" / "skills" / "alpha-skill" / "SKILL.md"
+    before = installed_path.read_text(encoding="utf-8")
+
+    result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 0, result.output
+    assert "Up To Date" in result.output
+    assert "Updated skill 'alpha-skill'." not in result.output
+    assert installed_path.read_text(encoding="utf-8") == before
+    assert "content_hash" in lockfile_path.read_text(encoding="utf-8")
+
+
 def test_update_warns_when_skill_path_or_skill_is_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
