@@ -124,7 +124,7 @@ def test_add_dry_run_previews_install_without_writing(tmp_path: Path, monkeypatc
     assert "Dry Run" in result.output
     assert "Would install: alpha-skill" in result.output
     assert not (project_root / ".agents" / "skills" / "alpha-skill").exists()
-    assert load_lockfile(project_root / "skills.lock").skills == {}
+    assert not (project_root / "skills.lock").exists()
 
 
 def test_add_supports_explicit_path_and_named_skill_selection(
@@ -433,6 +433,19 @@ def test_list_shows_installed_skills(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "alpha-skill" in result.output
 
 
+def test_list_without_installed_skills_does_not_create_lockfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["list"])
+
+    assert result.exit_code == 0, result.output
+    assert "No installed skills" in result.output
+    assert not (project_root / "skills.lock").exists()
+
+
 def test_ls_is_not_supported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project_root = make_project_root(tmp_path / "project")
     monkeypatch.chdir(project_root)
@@ -594,6 +607,19 @@ def test_update_dry_run_exits_three_when_changes_exist(tmp_path: Path, monkeypat
     assert entry.description == "Original description"
 
 
+def test_update_without_installed_skills_does_not_create_lockfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["update"])
+
+    assert result.exit_code == 0, result.output
+    assert "No Skills Installed" in result.output
+    assert not (project_root / "skills.lock").exists()
+
+
 def test_update_only_reinstalls_changed_skill_from_shared_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
@@ -693,6 +719,29 @@ def test_global_mode_uses_home_agents_directory(tmp_path: Path, monkeypatch: pyt
     lockfile = load_lockfile(fake_home / ".agents" / "skills.lock")
     assert lockfile.meta["mode"] == "global"
     assert lockfile.skills["global-skill"].install_path == "skills/global-skill"
+
+
+def test_local_mode_outside_git_repo_uses_current_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"local-skill": skill_markdown("local-skill", "Local description")},
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(workspace)
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert (workspace / ".agents" / "skills" / "local-skill" / "SKILL.md").is_file()
+    assert (workspace / "skills.lock").is_file()
+    assert not (fake_home / ".agents" / "skills" / "local-skill").exists()
+    lockfile = load_lockfile(workspace / "skills.lock")
+    assert lockfile.meta["mode"] == "project"
+    assert lockfile.skills["local-skill"].install_path == ".agents/skills/local-skill"
 
 
 def test_add_auth_failure_uses_exit_code_five(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

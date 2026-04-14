@@ -27,14 +27,6 @@ def load_lockfile(lockfile_path: Path) -> LockfileData:
     return LockfileData(meta=meta, skills=skills)
 
 
-def ensure_lockfile(context: InstallContext) -> LockfileData:
-    lockfile = load_lockfile(context.lockfile_path)
-    if context.lockfile_path.exists():
-        return lockfile
-    write_lockfile(context, lockfile)
-    return lockfile
-
-
 def write_lockfile(context: InstallContext, lockfile: LockfileData) -> None:
     context.lockfile_path.parent.mkdir(parents=True, exist_ok=True)
     payload = lockfile.to_dict()

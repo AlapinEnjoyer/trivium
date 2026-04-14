@@ -1,4 +1,5 @@
 import re
+import shutil
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -110,6 +111,22 @@ def hash_parsed_skill(parsed_skill: ParsedSkill) -> str:
         parsed_skill.directory,
         skill_document=render_skill_document(parsed_skill.frontmatter, parsed_skill.body),
     )
+
+
+def install_skill_tree(parsed_skill: ParsedSkill, destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(parsed_skill.directory, destination)
+    write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
+
+
+def repair_installed_skill_if_needed(parsed_skill: ParsedSkill, destination: Path) -> bool:
+    if not parsed_skill.warnings:
+        return False
+    if not destination.is_dir():
+        return False
+    write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
+    return True
 
 
 def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[ValidationIssue]]:

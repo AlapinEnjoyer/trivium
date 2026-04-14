@@ -60,6 +60,8 @@ trv update
 trv init my-skill
 ```
 
+By default, `trv` uses project mode in the current directory. If you are inside a git repository, the project root is the git root. If you are not in a git repository, the project root is simply your current working directory. Use `--global` or `-g` when you explicitly want `~/.agents/skills/`.
+
 ## Commands
 
 ### `add` - Install skills
@@ -129,11 +131,13 @@ trv init my-skill --full    # Include scripts/, references/, assets/
 
 ## Project vs Global Mode
 
-**Project mode** (default when in a git repo):
+**Project mode** (default):
 - Skills install to `.agents/skills/`
 - Metadata stored in `skills.lock`
+- If you are in a git repo, the git root is used
+- If you are not in a git repo, the current working directory is used
 
-**Global mode** (when not in a git repo, or with `--global`):
+**Global mode** (with `--global`):
 - Skills install to `~/.agents/skills/`
 - Available across all projects
 
@@ -142,6 +146,7 @@ trv init my-skill --full    # Include scripts/, references/, assets/
 `skills.lock` records where each skill came from:
 - Source repository URL
 - Commit hash
+- Per-skill content hash
 - Skill metadata (description, license, compatibility)
 
 This enables `trv update` to fetch newer versions from the original sources.

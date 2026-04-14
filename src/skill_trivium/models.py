@@ -116,8 +116,6 @@ class ValidationIssue:
 
 @dataclass(slots=True)
 class SourceUpdateResult:
-    source_url: str
-    commit_hash: str | None = None
     refreshed: dict[str, SkillLockEntry] = field(default_factory=dict)
     updated: dict[str, SkillLockEntry] = field(default_factory=dict)
     warnings: list[tuple[str, str]] = field(default_factory=list)

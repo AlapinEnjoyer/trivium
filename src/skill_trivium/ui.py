@@ -5,6 +5,8 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
+from skill_trivium.models import ValidationIssue
+
 console = Console()
 
 STATUS_STYLES = {
@@ -19,6 +21,16 @@ def make_panel(kind: str, title: str, lines: Sequence[str]) -> Panel:
     color = STATUS_STYLES[kind]
     renderables = [status_line(kind, line) for line in lines]
     return Panel(Group(*renderables), title=title, border_style=color)
+
+
+def print_validation_issue(issue: ValidationIssue) -> None:
+    console.print(
+        make_panel(
+            "err",
+            f"Validation Failed: {issue.skill_name}",
+            [f"Field: {issue.field}", f"Rule: {issue.rule}"],
+        )
+    )
 
 
 def status_line(kind: str, message: str) -> Text:

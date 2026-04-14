@@ -16,16 +16,13 @@ def resolve_install_context(global_mode: bool, cwd: Path | None = None) -> Insta
     if global_mode:
         return _global_context()
 
-    git_root = find_git_root(current)
-    if git_root is None:
-        return _global_context()
-
+    project_root = find_git_root(current) or current
     install_prefix = Path(".agents") / "skills"
     return InstallContext(
         mode="project",
-        base_dir=git_root,
-        skills_dir=git_root / install_prefix,
-        lockfile_path=git_root / "skills.lock",
+        base_dir=project_root,
+        skills_dir=project_root / install_prefix,
+        lockfile_path=project_root / "skills.lock",
         install_prefix=install_prefix,
     )
 

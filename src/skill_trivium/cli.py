@@ -1,8 +1,6 @@
 import json
 import shutil
 import sys
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import questionary
@@ -17,21 +15,30 @@ from rich.table import Table
 from skill_trivium import __version__
 from skill_trivium.context import ensure_storage, resolve_install_context
 from skill_trivium.git import GitCloneError, cloned_repo
-from skill_trivium.lockfile import ensure_lockfile, write_lockfile
-from skill_trivium.models import InstallContext, ParsedSkill, SkillLockEntry, SourceUpdateResult, ValidationIssue
+from skill_trivium.lockfile import load_lockfile, write_lockfile
+from skill_trivium.models import InstallContext, ParsedSkill, SkillLockEntry, ValidationIssue
 from skill_trivium.skills import (
     build_skill_markdown,
     discover_skills_path,
     enumerate_skill_directories,
     hash_parsed_skill,
-    hash_skill_directory,
+    install_skill_tree,
     parse_skill_document,
+    repair_installed_skill_if_needed,
     utc_now,
     validate_skill_directory,
     validate_skill_name,
-    write_skill_document,
 )
-from skill_trivium.ui import console, make_panel, progress_bar, shorten_source, status_line, truncate_text
+from skill_trivium.ui import (
+    console,
+    make_panel,
+    print_validation_issue,
+    progress_bar,
+    shorten_source,
+    status_line,
+    truncate_text,
+)
+from skill_trivium.update import render_update_summary, run_update
 
 HELP_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 ADD_CONTEXT_SETTINGS = {**HELP_CONTEXT_SETTINGS, "allow_extra_args": True}
@@ -92,8 +99,7 @@ def add(
 ) -> None:
     requested_names = _parse_add_skill_names(ctx, all_, skills)
     context = resolve_install_context(global_)
-    ensure_storage(context)
-    lockfile = ensure_lockfile(context)
+    lockfile = load_lockfile(context.lockfile_path)
 
     installed: list[str] = []
     would_install: list[str] = []
@@ -140,7 +146,7 @@ def add(
                                 rule="The requested skill was not found in the remote repository.",
                             )
                             validation_issues.append(issue)
-                            _print_validation_issue(issue)
+                            print_validation_issue(issue)
                             failed.append(name)
                     target_directories = [candidate_map[name] for name in requested_names if name in candidate_map]
 
@@ -150,7 +156,7 @@ def add(
                     if issues:
                         validation_issues.extend(issues)
                         for issue in issues:
-                            _print_validation_issue(issue)
+                            print_validation_issue(issue)
                         failed.append(skill_dir.name)
                         continue
                     parsed_skills.append(parsed_skill)
@@ -164,7 +170,7 @@ def add(
                         pending_installs.append(parsed_skill)
                         continue
                     if existing.source_url == url:
-                        if not dry_run and _repair_installed_skill_if_needed(
+                        if not dry_run and repair_installed_skill_if_needed(
                             parsed_skill, context.install_path_for(parsed_skill.name)
                         ):
                             repaired.append(parsed_skill.name)
@@ -217,8 +223,9 @@ def add(
                     if dry_run:
                         would_install.append(parsed_skill.name)
                         continue
+                    ensure_storage(context)
                     destination = context.install_path_for(parsed_skill.name)
-                    _install_skill_tree(parsed_skill, destination)
+                    install_skill_tree(parsed_skill, destination)
                     for warning in parsed_skill.warnings:
                         console.print(make_panel("warn", f"Conversion Warning: {parsed_skill.name}", [warning]))
                     lockfile.skills[parsed_skill.name] = entry
@@ -281,8 +288,7 @@ def update(
     ),
 ) -> None:
     context = resolve_install_context(global_)
-    ensure_storage(context)
-    lockfile = ensure_lockfile(context)
+    lockfile = load_lockfile(context.lockfile_path)
     if not lockfile.skills:
         console.print(make_panel("info", "No Skills Installed", ["Nothing to update."]))
         raise typer.Exit()
@@ -291,102 +297,17 @@ def update(
     missing = [name for name in requested_skills if name not in lockfile.skills]
     if missing:
         for name in missing:
-            _print_validation_issue(
+            print_validation_issue(
                 ValidationIssue(skill_name=name, field="name", rule="The requested skill is not installed.")
             )
         raise typer.Exit(code=2)
 
-    target_entries = {name: lockfile.skills[name] for name in (requested_skills or sorted(lockfile.skills))}
-    grouped_entries: dict[str, list[SkillLockEntry]] = defaultdict(list)
-    for entry in target_entries.values():
-        grouped_entries[entry.source_url].append(entry)
+    outcome = run_update(lockfile=lockfile, context=context, requested_skills=requested_skills, dry_run=dry_run)
+    render_update_summary(outcome, dry_run=dry_run)
 
-    results: list[SourceUpdateResult] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(8, len(grouped_entries)))) as executor:
-        with progress_bar() as progress:
-            future_map = {}
-            for source_url, entries in grouped_entries.items():
-                task_id = progress.add_task(f"Updating {shorten_source(source_url, 48)}", total=None)
-                future = executor.submit(_update_source_group, source_url, entries, context, dry_run)
-                future_map[future] = task_id
-
-            for future in as_completed(future_map):
-                task_id = future_map[future]
-                result = future.result()
-                progress.update(task_id, completed=1)
-                results.append(result)
-
-    updated_names: list[str] = []
-    validation_issues: list[ValidationIssue] = []
-    auth_failure = False
-    general_errors = False
-    warning_count = 0
-    lockfile_changed = False
-
-    for result in sorted(results, key=lambda item: item.source_url):
-        for skill_name, warning in result.warnings:
-            warning_count += 1
-            console.print(
-                make_panel(
-                    "warn",
-                    f"Update Warning: {skill_name}",
-                    [
-                        warning,
-                        f"Re-run `trivium add {result.source_url}` if the skill moved elsewhere in the repository.",
-                    ],
-                )
-            )
-        for issue in result.validation_issues:
-            validation_issues.append(issue)
-            _print_validation_issue(issue)
-        for error in result.errors:
-            general_errors = True
-            console.print(make_panel("err", "Update Failed", [error]))
-        auth_failure = auth_failure or result.auth_failure
-
-        for skill_name, refreshed_entry in sorted(result.refreshed.items()):
-            lockfile.skills[skill_name] = refreshed_entry
-            lockfile_changed = True
-
-        if dry_run:
-            updated_names.extend(sorted(result.updated))
-            continue
-
-        for skill_name, new_entry in sorted(result.updated.items()):
-            lockfile.skills[skill_name] = new_entry
-            updated_names.append(skill_name)
-            lockfile_changed = True
-
-    if lockfile_changed and not dry_run:
-        write_lockfile(context, lockfile)
-
-    if dry_run and updated_names:
-        console.print(
-            make_panel(
-                "info",
-                "Dry Run",
-                [f"Would update skill '{name}'." for name in sorted(updated_names)],
-            )
-        )
-    elif updated_names:
-        console.print(
-            make_panel(
-                "ok",
-                "Update Summary",
-                [f"Updated skill '{name}'." for name in sorted(updated_names)],
-            )
-        )
-    elif not validation_issues and not auth_failure and not general_errors and warning_count == 0:
-        console.print(make_panel("ok", "Up To Date", ["All requested skills are already current."]))
-
-    if auth_failure:
-        raise typer.Exit(code=5)
-    if validation_issues:
-        raise typer.Exit(code=2)
-    if general_errors:
-        raise typer.Exit(code=1)
-    if dry_run and updated_names:
-        raise typer.Exit(code=3)
+    exit_code = outcome.exit_code(dry_run=dry_run)
+    if exit_code is not None:
+        raise typer.Exit(code=exit_code)
 
 
 @app.command("list")
@@ -408,11 +329,10 @@ def info(
     global_: bool = typer.Option(False, "--global", "-g", help="Look up the skill in the global install."),
 ) -> None:
     context = resolve_install_context(global_)
-    ensure_storage(context)
-    lockfile = ensure_lockfile(context)
+    lockfile = load_lockfile(context.lockfile_path)
     entry = lockfile.skills.get(skill_name)
     if entry is None:
-        _print_validation_issue(
+        print_validation_issue(
             ValidationIssue(skill_name=skill_name, field="name", rule="The requested skill is not installed.")
         )
         raise typer.Exit(code=2)
@@ -468,8 +388,7 @@ def remove(
         raise typer.Exit(code=2)
 
     context = resolve_install_context(global_)
-    ensure_storage(context)
-    lockfile = ensure_lockfile(context)
+    lockfile = load_lockfile(context.lockfile_path)
     if not lockfile.skills:
         console.print(make_panel("info", "No Skills Installed", ["Nothing to remove."]))
         raise typer.Exit()
@@ -478,7 +397,7 @@ def remove(
     missing = [name for name in target_names if name not in lockfile.skills]
     if missing:
         for name in missing:
-            _print_validation_issue(
+            print_validation_issue(
                 ValidationIssue(skill_name=name, field="name", rule="The requested skill is not installed.")
             )
         raise typer.Exit(code=2)
@@ -521,12 +440,10 @@ def init(
 ) -> None:
     validation_issue = _validate_init_name(skill_name)
     if validation_issue is not None:
-        _print_validation_issue(validation_issue)
+        print_validation_issue(validation_issue)
         raise typer.Exit(code=2)
 
     context = resolve_install_context(global_)
-    ensure_storage(context)
-    ensure_lockfile(context)
     destination = context.install_path_for(skill_name)
     if destination.exists():
         console.print(
@@ -538,11 +455,15 @@ def init(
         )
         raise typer.Exit(code=1)
 
+    ensure_storage(context)
+    lockfile = load_lockfile(context.lockfile_path)
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "SKILL.md").write_text(build_skill_markdown(skill_name), encoding="utf-8")
     if full:
         for directory_name in ("scripts", "references", "assets"):
             (destination / directory_name).mkdir()
+
+    write_lockfile(context, lockfile)
 
     console.print(
         make_panel(
@@ -618,56 +539,6 @@ def _summary_lines(
     return lines
 
 
-def _replace_tree(source: Path, destination: Path) -> None:
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(source, destination)
-
-
-def _install_skill_tree(parsed_skill: ParsedSkill, destination: Path) -> None:
-    _replace_tree(parsed_skill.directory, destination)
-    write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
-
-
-def _repair_installed_skill_if_needed(parsed_skill: ParsedSkill, destination: Path) -> bool:
-    if not parsed_skill.warnings:
-        return False
-    if not destination.is_dir():
-        return False
-    write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
-    return True
-
-
-def _entry_needs_refresh(entry: SkillLockEntry, parsed_skill: ParsedSkill, destination: Path) -> bool:
-    expected_hash = hash_parsed_skill(parsed_skill)
-    if entry.content_hash is None:
-        if not destination.is_dir():
-            return True
-        return hash_skill_directory(destination) != expected_hash
-    if expected_hash != entry.content_hash:
-        return True
-    return not destination.is_dir()
-
-
-def _refreshed_entry(
-    entry: SkillLockEntry, parsed_skill: ParsedSkill, context: InstallContext, commit_hash: str
-) -> SkillLockEntry:
-    return SkillLockEntry(
-        name=parsed_skill.name,
-        source_url=entry.source_url,
-        commit_hash=commit_hash,
-        content_hash=hash_parsed_skill(parsed_skill),
-        skills_path=entry.skills_path,
-        install_path=context.relative_install_path(parsed_skill.name),
-        description=parsed_skill.description,
-        license=parsed_skill.license,
-        compatibility=parsed_skill.compatibility,
-        allowed_tools=parsed_skill.allowed_tools,
-        installed_at=entry.installed_at,
-        metadata=parsed_skill.metadata,
-    )
-
-
 def _conflict_panel(
     parsed_skill: ParsedSkill,
     existing: SkillLockEntry,
@@ -682,20 +553,9 @@ def _conflict_panel(
     return make_panel("warn", f"Conflict: {parsed_skill.name}", lines)
 
 
-def _print_validation_issue(issue: ValidationIssue) -> None:
-    console.print(
-        make_panel(
-            "err",
-            f"Validation Failed: {issue.skill_name}",
-            [f"Field: {issue.field}", f"Rule: {issue.rule}"],
-        )
-    )
-
-
 def _render_skill_list(*, json_: bool, global_: bool) -> None:
     context = resolve_install_context(global_)
-    ensure_storage(context)
-    lockfile = ensure_lockfile(context)
+    lockfile = load_lockfile(context.lockfile_path)
     if json_:
         console.out(json.dumps(lockfile.to_dict(), indent=2, sort_keys=True))
         return
@@ -742,72 +602,3 @@ def _validate_init_name(skill_name: str) -> ValidationIssue | None:
     if not issues:
         return None
     return issues[0]
-
-
-def _update_source_group(
-    source_url: str,
-    entries: list[SkillLockEntry],
-    context: InstallContext,
-    dry_run: bool,
-) -> SourceUpdateResult:
-    result = SourceUpdateResult(source_url=source_url)
-    try:
-        with cloned_repo(source_url) as (repo_path, commit_hash):
-            result.commit_hash = commit_hash
-            for entry in entries:
-                container = repo_path if entry.skills_path == "." else repo_path / entry.skills_path
-                if not container.is_dir():
-                    result.warnings.append(
-                        (
-                            entry.name,
-                            f"The registered skills path '{entry.skills_path}' no longer exists for this skill.",
-                        )
-                    )
-                    continue
-
-                skill_dir = container / entry.name
-                if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
-                    result.warnings.append(
-                        (
-                            entry.name,
-                            f"The skill was not found at '{entry.skills_path}/{entry.name}'.",
-                        )
-                    )
-                    continue
-
-                parsed_skill, issues = validate_skill_directory(skill_dir)
-                if issues:
-                    result.validation_issues.extend(issues)
-                    continue
-                if not _entry_needs_refresh(entry, parsed_skill, context.install_path_for(entry.name)):
-                    if not dry_run:
-                        try:
-                            if _repair_installed_skill_if_needed(parsed_skill, context.install_path_for(entry.name)):
-                                for warning in parsed_skill.warnings:
-                                    result.warnings.append((parsed_skill.name, warning))
-                        except OSError as error:
-                            result.errors.append(f"{entry.name}: {error}")
-                            continue
-                    if entry.content_hash is None or entry.commit_hash != commit_hash:
-                        result.refreshed[entry.name] = _refreshed_entry(entry, parsed_skill, context, commit_hash)
-                    continue
-
-                updated_entry = _refreshed_entry(entry, parsed_skill, context, commit_hash)
-                if not dry_run:
-                    try:
-                        ensure_storage(context)
-                        _install_skill_tree(parsed_skill, context.install_path_for(entry.name))
-                        for warning in parsed_skill.warnings:
-                            result.warnings.append((parsed_skill.name, warning))
-                    except OSError as error:
-                        result.errors.append(f"{entry.name}: {error}")
-                        continue
-                result.updated[entry.name] = updated_entry
-    except GitCloneError as error:
-        result.auth_failure = error.auth_failure
-        message = error.stderr
-        if error.guidance is not None:
-            message = f"{message} {error.guidance}"
-        result.errors.append(f"{source_url}: {message}")
-
-    return result
