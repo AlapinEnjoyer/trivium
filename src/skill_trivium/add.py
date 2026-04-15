@@ -7,6 +7,11 @@ import typer
 from rich.panel import Panel
 
 from skill_trivium.context import ensure_storage, resolve_install_context
+from skill_trivium.environment import (
+    EnvironmentError,
+    ensure_active_environment_runtime_is_clean,
+    sync_active_environment,
+)
 from skill_trivium.git import GitCloneError, cloned_repo
 from skill_trivium.lockfile import load_lockfile, write_lockfile
 from skill_trivium.models import InstallContext, LockfileData, ParsedSkill, SkillLockEntry, ValidationIssue
@@ -100,95 +105,109 @@ def run_add(
     """
     requested_names = _parse_add_skill_names(ctx, all_, skills)
     context = resolve_install_context(global_)
+    try:
+        ensure_active_environment_runtime_is_clean(context)
+    except EnvironmentError as error:
+        console.print(make_panel(error.kind, error.title, list(error.lines)))
+        raise typer.Exit(code=error.exit_code) from error
+
     lockfile = load_lockfile(context.lockfile_path)
 
     install_outcome = AddOutcome()
 
-    with progress_factory() as progress:
-        task = progress.add_task("Cloning repository", total=None)
-        try:
-            with cloned_repo(url) as (repo_path, commit_hash):
-                progress.update(task, completed=1)
-                skills_container, skills_path = _resolve_skills_container(repo_path, path)
-                target_directories = _select_target_skill_directories(
-                    skills_container=skills_container,
-                    requested_names=requested_names,
-                    validation_issues=install_outcome.validation_issues,
-                    failed=install_outcome.failed,
-                )
-                parsed_skills = _validate_target_skills(
-                    target_directories,
-                    validation_issues=install_outcome.validation_issues,
-                    failed=install_outcome.failed,
-                )
-                resolution = _classify_add_candidates(
-                    parsed_skills=parsed_skills,
-                    lockfile=lockfile,
-                    source_url=url,
-                    context=context,
-                    dry_run=dry_run,
-                    repaired=install_outcome.repaired,
-                    skipped=install_outcome.skipped,
-                )
-
-                # Stop the live display before printing conflict panels or
-                # prompting so Rich and Questionary do not compete for the terminal.
-                progress.stop()
-
-                if resolution.conflicts and not yes and not is_interactive_terminal():
-                    for parsed_skill, existing in resolution.conflicts:
-                        console.print(_conflict_panel(parsed_skill, existing, url, commit_hash))
-                    raise typer.Exit(code=4)
-
-                replaced = _resolve_conflicts(
-                    resolution=resolution,
-                    yes=yes,
-                    select_conflict=select_conflict,
-                    incoming_source_url=url,
-                    incoming_commit_hash=commit_hash,
-                    skipped=install_outcome.skipped,
-                )
-
-                _apply_pending_installs(
-                    pending_installs=resolution.pending_installs,
-                    source_url=url,
-                    commit_hash=commit_hash,
-                    skills_path=skills_path,
-                    context=context,
-                    lockfile=lockfile,
-                    dry_run=dry_run,
-                    installed=install_outcome.installed,
-                    would_install=install_outcome.would_install,
-                )
-
-                if resolution.pending_installs and not dry_run:
-                    write_lockfile(context, lockfile)
-
-                if replaced and not dry_run:
-                    console.print(
-                        make_panel(
-                            "info",
-                            "Conflicts Replaced",
-                            [f"Replaced skill '{name}' with the incoming source." for name in sorted(replaced)],
-                        )
+    try:
+        with progress_factory() as progress:
+            task = progress.add_task("Cloning repository", total=None)
+            try:
+                with cloned_repo(url) as (repo_path, commit_hash):
+                    progress.update(task, completed=1)
+                    skills_container, skills_path = _resolve_skills_container(repo_path, path)
+                    target_directories = _select_target_skill_directories(
+                        skills_container=skills_container,
+                        requested_names=requested_names,
+                        validation_issues=install_outcome.validation_issues,
+                        failed=install_outcome.failed,
                     )
-                if install_outcome.repaired:
-                    console.print(
-                        make_panel(
-                            "info",
-                            "Normalized Installed Skills",
-                            [
-                                f"Rewrote installed SKILL.md for '{name}' to match normalized metadata."
-                                for name in install_outcome.repaired
-                            ],
-                        )
+                    parsed_skills = _validate_target_skills(
+                        target_directories,
+                        validation_issues=install_outcome.validation_issues,
+                        failed=install_outcome.failed,
                     )
-        except GitCloneError as error:
-            lines = [error.stderr]
-            if error.guidance is not None:
-                lines.append(error.guidance)
-            console.print(make_panel("warn" if error.auth_failure else "err", "Git Clone Failed", lines))
-            raise typer.Exit(code=5 if error.auth_failure else 1) from error
+                    resolution = _classify_add_candidates(
+                        parsed_skills=parsed_skills,
+                        lockfile=lockfile,
+                        source_url=url,
+                        context=context,
+                        dry_run=dry_run,
+                        repaired=install_outcome.repaired,
+                        skipped=install_outcome.skipped,
+                    )
+
+                    # Stop the live display before printing conflict panels or
+                    # prompting so Rich and Questionary do not compete for the terminal.
+                    progress.stop()
+
+                    if resolution.conflicts and not yes and not is_interactive_terminal():
+                        for parsed_skill, existing in resolution.conflicts:
+                            console.print(_conflict_panel(parsed_skill, existing, url, commit_hash))
+                        raise typer.Exit(code=4)
+
+                    replaced = _resolve_conflicts(
+                        resolution=resolution,
+                        yes=yes,
+                        select_conflict=select_conflict,
+                        incoming_source_url=url,
+                        incoming_commit_hash=commit_hash,
+                        skipped=install_outcome.skipped,
+                    )
+
+                    _apply_pending_installs(
+                        pending_installs=resolution.pending_installs,
+                        source_url=url,
+                        commit_hash=commit_hash,
+                        skills_path=skills_path,
+                        context=context,
+                        lockfile=lockfile,
+                        dry_run=dry_run,
+                        installed=install_outcome.installed,
+                        would_install=install_outcome.would_install,
+                    )
+
+                    runtime_changed = bool(resolution.pending_installs or install_outcome.repaired)
+                    if resolution.pending_installs and not dry_run:
+                        write_lockfile(context, lockfile)
+
+                    if runtime_changed and not dry_run:
+                        sync_active_environment(context)
+
+                    if replaced and not dry_run:
+                        console.print(
+                            make_panel(
+                                "info",
+                                "Conflicts Replaced",
+                                [f"Replaced skill '{name}' with the incoming source." for name in sorted(replaced)],
+                            )
+                        )
+                    if install_outcome.repaired:
+                        console.print(
+                            make_panel(
+                                "info",
+                                "Normalized Installed Skills",
+                                [
+                                    f"Rewrote installed SKILL.md for '{name}' to match normalized metadata."
+                                    for name in install_outcome.repaired
+                                ],
+                            )
+                        )
+            except GitCloneError as error:
+                lines = [error.stderr]
+                if error.guidance is not None:
+                    lines.append(error.guidance)
+                console.print(make_panel("warn" if error.auth_failure else "err", "Git Clone Failed", lines))
+                raise typer.Exit(code=5 if error.auth_failure else 1) from error
+    except EnvironmentError as error:
+        console.print(make_panel(error.kind, error.title, list(error.lines)))
+        raise typer.Exit(code=error.exit_code) from error
 
     summary_lines = _summary_lines(
         install_outcome.installed,

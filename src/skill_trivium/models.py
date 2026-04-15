@@ -125,6 +125,7 @@ class UpdateWarning:
 class SourceUpdateResult:
     refreshed: dict[str, SkillLockEntry] = field(default_factory=dict)
     updated: dict[str, SkillLockEntry] = field(default_factory=dict)
+    rewritten: set[str] = field(default_factory=set)
     warnings: list[UpdateWarning] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)

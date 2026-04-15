@@ -106,7 +106,7 @@ def test_add_installs_all_valid_skills_and_writes_lockfile(
     assert lockfile.meta["mode"] == "project"
     assert lockfile.skills["alpha-skill"].skills_path == "."
     assert lockfile.skills["alpha-skill"].install_path == ".agents/skills/alpha-skill"
-    assert len(lockfile.skills["alpha-skill"].commit_hash) < 40
+    assert len(lockfile.skills["alpha-skill"].commit_hash) == 40
     assert lockfile.skills["beta-skill"].metadata == {"author": "example-org", "version": "1.0"}
 
 
@@ -866,6 +866,314 @@ def test_add_auth_failure_uses_exit_code_five(tmp_path: Path, monkeypatch: pytes
     assert result.exit_code == 5
     assert "Git Clone Failed" in result.output
     assert "credential.helper" in result.output
+
+
+def test_env_create_captures_current_runtime_and_list_shows_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "pptx": skill_markdown("pptx", "PowerPoint skill"),
+            "pdf": skill_markdown("pdf", "PDF skill"),
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert add_result.exit_code == 0, add_result.output
+
+    create_result = runner.invoke(app, ["env", "create", "office"])
+
+    assert create_result.exit_code == 0, create_result.output
+    assert "Environment Created" in create_result.output
+    assert (fake_home / ".trivium" / "projects").is_dir()
+
+    env_list = runner.invoke(app, ["env", "list"])
+
+    assert env_list.exit_code == 0, env_list.output
+    assert "office" in env_list.output
+    assert "2" in env_list.output
+
+
+def test_env_activate_and_deactivate_swaps_runtime_skill_sets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "pdf": skill_markdown("pdf", "PDF skill"),
+            "word": skill_markdown("word", "Word skill"),
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    runner.invoke(app, ["add", str(remote_repo), "--skills", "pdf"])
+    office_result = runner.invoke(app, ["env", "create", "office"])
+    assert office_result.exit_code == 0, office_result.output
+
+    runner.invoke(app, ["remove", "pdf", "--yes"])
+    runner.invoke(app, ["add", str(remote_repo), "--skills", "word"])
+    creativity_result = runner.invoke(app, ["env", "create", "creativity"])
+    assert creativity_result.exit_code == 0, creativity_result.output
+
+    activate_office = runner.invoke(app, ["env", "activate", "office"])
+    assert activate_office.exit_code == 0, activate_office.output
+    assert (project_root / ".agents" / "skills" / "pdf").is_dir()
+    assert not (project_root / ".agents" / "skills" / "word").exists()
+    assert load_lockfile(project_root / "skills.lock").meta["environment"] == "office"
+
+    activate_creativity = runner.invoke(app, ["env", "activate", "creativity"])
+    assert activate_creativity.exit_code == 0, activate_creativity.output
+    assert (project_root / ".agents" / "skills" / "word").is_dir()
+    assert not (project_root / ".agents" / "skills" / "pdf").exists()
+    assert load_lockfile(project_root / "skills.lock").meta["environment"] == "creativity"
+
+    deactivate_result = runner.invoke(app, ["env", "deactivate"])
+    assert deactivate_result.exit_code == 0, deactivate_result.output
+    assert (project_root / ".agents" / "skills" / "word").is_dir()
+    assert not (project_root / ".agents" / "skills" / "pdf").exists()
+    assert (
+        not (project_root / "skills.lock").exists()
+        or "environment" not in load_lockfile(project_root / "skills.lock").meta
+    )
+
+
+def test_env_activate_shared_materializes_local_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"pdf": skill_markdown("pdf", "PDF skill")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    runner.invoke(app, ["add", str(remote_repo), "--all"])
+    create_result = runner.invoke(app, ["env", "create", "office", "--shared"])
+    assert create_result.exit_code == 0, create_result.output
+
+    local_env_dir = next((fake_home / ".trivium" / "projects").glob("*/envs/office"))
+    shutil_rmtree(local_env_dir)
+
+    runner.invoke(app, ["remove", "pdf", "--yes"])
+    activate_result = runner.invoke(app, ["env", "activate", "office"])
+
+    assert activate_result.exit_code == 0, activate_result.output
+    assert (project_root / ".agents" / "skills" / "pdf").is_dir()
+    assert next((fake_home / ".trivium" / "projects").glob("*/envs/office/skills/pdf/SKILL.md")).is_file()
+
+
+def test_add_updates_active_environment_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "pdf": skill_markdown("pdf", "PDF skill"),
+            "word": skill_markdown("word", "Word skill"),
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    runner.invoke(app, ["add", str(remote_repo), "--skills", "pdf"])
+    runner.invoke(app, ["env", "create", "office"])
+    runner.invoke(app, ["env", "activate", "office"])
+
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--skills", "word"])
+
+    assert add_result.exit_code == 0, add_result.output
+
+    runner.invoke(app, ["env", "deactivate"])
+    runner.invoke(app, ["remove", "pdf", "word", "--yes"])
+    reactivate_result = runner.invoke(app, ["env", "activate", "office"])
+
+    assert reactivate_result.exit_code == 0, reactivate_result.output
+    assert (project_root / ".agents" / "skills" / "pdf").is_dir()
+    assert (project_root / ".agents" / "skills" / "word").is_dir()
+
+
+def test_env_create_fails_when_runtime_contains_unmanaged_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    unmanaged_dir = project_root / ".agents" / "skills" / "local-only"
+    unmanaged_dir.mkdir(parents=True)
+    write_skill(unmanaged_dir / "SKILL.md", skill_markdown("local-only", "Local only skill"))
+
+    result = runner.invoke(app, ["env", "create", "office"])
+
+    assert result.exit_code == 2
+    assert "Unmanaged Skills Detected" in result.output
+
+
+def test_init_is_blocked_while_environment_is_active(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"pdf": skill_markdown("pdf", "PDF skill")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    runner.invoke(app, ["add", str(remote_repo), "--all"])
+    runner.invoke(app, ["env", "create", "office"])
+    runner.invoke(app, ["env", "activate", "office"])
+
+    result = runner.invoke(app, ["init", "draft-skill"])
+
+    assert result.exit_code == 2
+    assert "Init Blocked While Environment Is Active" in result.output
+
+
+def test_env_remove_deletes_local_and_shared_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"pdf": skill_markdown("pdf", "PDF skill")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    runner.invoke(app, ["add", str(remote_repo), "--all"])
+    create_result = runner.invoke(app, ["env", "create", "office", "--shared"])
+    assert create_result.exit_code == 0, create_result.output
+
+    remove_result = runner.invoke(app, ["env", "remove", "office"])
+
+    assert remove_result.exit_code == 0, remove_result.output
+    assert "Environment Removed" in remove_result.output
+    assert "Removed the local snapshot." in remove_result.output
+    assert "Removed the shared environment definition." in remove_result.output
+    assert not list((fake_home / ".trivium" / "projects").glob("*/envs/office"))
+    assert not (project_root / ".agents" / "environments" / "office.lock").exists()
+
+
+def test_env_remove_auto_deactivates_active_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "pdf": skill_markdown("pdf", "PDF skill"),
+            "word": skill_markdown("word", "Word skill"),
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    runner.invoke(app, ["add", str(remote_repo), "--skills", "pdf"])
+    runner.invoke(app, ["env", "create", "office"])
+    runner.invoke(app, ["remove", "pdf", "--yes"])
+    runner.invoke(app, ["add", str(remote_repo), "--skills", "word"])
+    runner.invoke(app, ["env", "activate", "office"])
+
+    remove_result = runner.invoke(app, ["env", "remove", "office"])
+
+    assert remove_result.exit_code == 0, remove_result.output
+    assert "Deactivated it and restored the default runtime first." in remove_result.output
+    assert (project_root / ".agents" / "skills" / "word").is_dir()
+    assert not (project_root / ".agents" / "skills" / "pdf").exists()
+
+
+def test_env_activate_can_materialize_from_shared_lockfile_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"pdf": skill_markdown("pdf", "PDF skill")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    runner.invoke(app, ["add", str(remote_repo), "--all"])
+    runner.invoke(app, ["env", "create", "office", "--shared"])
+    runner.invoke(app, ["env", "remove", "office"])
+
+    shared_lockfile = project_root / ".agents" / "environments" / "office.lock"
+    shared_lockfile.parent.mkdir(parents=True, exist_ok=True)
+    shared_lockfile.write_text((project_root / "skills.lock").read_text(encoding="utf-8"), encoding="utf-8")
+    runner.invoke(app, ["remove", "pdf", "--yes"])
+
+    activate_result = runner.invoke(app, ["env", "activate", "office"])
+
+    assert activate_result.exit_code == 0, activate_result.output
+    assert (project_root / ".agents" / "skills" / "pdf" / "SKILL.md").is_file()
+
+
+def test_env_remove_active_shared_materialized_environment_restores_default_without_dirty_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "capture-api-response-test-fixture": "\n".join(
+                [
+                    "---",
+                    "name: capture-api-response-test-fixture",
+                    "description: |",
+                    "  Capture API response test fixture.",
+                    "metadata:",
+                    "  internal: true",
+                    "---",
+                    "",
+                    "## Instructions",
+                    "",
+                    "Use this skill carefully.",
+                ]
+            )
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert add_result.exit_code == 0, add_result.output
+    create_result = runner.invoke(app, ["env", "create", "caveman", "--shared"])
+    assert create_result.exit_code == 0, create_result.output
+    remove_result = runner.invoke(app, ["env", "remove", "caveman"])
+    assert remove_result.exit_code == 0, remove_result.output
+
+    shared_lockfile = project_root / ".agents" / "environments" / "caveman.lock"
+    shared_lockfile.parent.mkdir(parents=True, exist_ok=True)
+    shared_lockfile.write_text((project_root / "skills.lock").read_text(encoding="utf-8"), encoding="utf-8")
+
+    activate_result = runner.invoke(app, ["env", "activate", "caveman"])
+    assert activate_result.exit_code == 0, activate_result.output
+
+    active_remove_result = runner.invoke(app, ["env", "remove", "caveman"])
+
+    assert active_remove_result.exit_code == 0, active_remove_result.output
+    assert "Runtime Has Local Modifications" not in active_remove_result.output
+
+    missing_activate_result = runner.invoke(app, ["env", "activate", "caveman"])
+
+    assert missing_activate_result.exit_code == 2
+    assert "Environment Not Found" in missing_activate_result.output
 
 
 def make_project_root(path: Path) -> Path:

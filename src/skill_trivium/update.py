@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from skill_trivium.context import ensure_storage
+from skill_trivium.environment import (
+    ensure_active_environment_runtime_is_clean,
+    sync_active_environment,
+)
 from skill_trivium.git import GitCloneError, cloned_repo
 from skill_trivium.lockfile import write_lockfile
 from skill_trivium.models import (
@@ -34,6 +38,7 @@ class UpdateOutcome:
     general_errors: bool = False
     warning_count: int = 0
     lockfile_changed: bool = False
+    runtime_changed: bool = False
 
     def exit_code(self, *, dry_run: bool) -> int | None:
         if self.auth_failure:
@@ -54,6 +59,7 @@ def run_update(
     requested_skills: list[str],
     dry_run: bool,
 ) -> UpdateOutcome:
+    ensure_active_environment_runtime_is_clean(context)
     target_entries = {name: lockfile.skills[name] for name in (requested_skills or sorted(lockfile.skills))}
     grouped_entries: dict[str, list[SkillLockEntry]] = defaultdict(list)
     for entry in target_entries.values():
@@ -82,6 +88,9 @@ def run_update(
 
     if outcome.lockfile_changed and not dry_run:
         write_lockfile(context, lockfile)
+
+    if outcome.runtime_changed and not dry_run:
+        sync_active_environment(context)
 
     return outcome
 
@@ -150,6 +159,8 @@ def _apply_update_result(
     for skill_name, refreshed_entry in sorted(result.refreshed.items()):
         lockfile.skills[skill_name] = refreshed_entry
         outcome.lockfile_changed = True
+        if skill_name in result.rewritten:
+            outcome.runtime_changed = True
 
     if dry_run:
         outcome.updated_names.extend(sorted(result.updated))
@@ -159,6 +170,7 @@ def _apply_update_result(
         lockfile.skills[skill_name] = new_entry
         outcome.updated_names.append(skill_name)
         outcome.lockfile_changed = True
+        outcome.runtime_changed = True
 
 
 def _update_source_group(
@@ -203,6 +215,7 @@ def _update_source_group(
                     if not dry_run:
                         try:
                             if rewrite_normalized_skill_document_if_needed(parsed_skill, destination):
+                                result.rewritten.add(parsed_skill.name)
                                 for warning in parsed_skill.warnings:
                                     result.warnings.append(UpdateWarning(skill_name=parsed_skill.name, message=warning))
                         except OSError as error:

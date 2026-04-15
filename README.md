@@ -52,6 +52,12 @@ trv add https://github.com/example/skills.git --all
 # Install specific skills
 trv add https://github.com/example/skills.git --skills pdf-processing algorithmic-art
 
+# Capture the current runtime as an environment
+trv env create office
+
+# Activate a named environment
+trv env activate office
+
 # List installed skills
 trv list
 
@@ -131,6 +137,19 @@ trv init my-skill           # Minimal scaffold
 trv init my-skill --full    # Include scripts/, references/, assets/
 ```
 
+### `env` - Manage named environments
+
+```bash
+trv env list
+trv env create office
+trv env create office --shared
+trv env create scratch --empty
+trv env activate office
+trv env info
+trv env deactivate
+trv env remove office
+```
+
 ## Project vs Global Mode
 
 **Project mode** (default):
@@ -147,8 +166,22 @@ trv init my-skill --full    # Include scripts/, references/, assets/
 
 `skills.lock` records where each skill came from:
 - Source repository URL
-- Commit hash
+- Full commit hash
 - Per-skill content hash
 - Skill metadata (description, license, compatibility)
 
 This enables `trv update` to fetch newer versions from the original sources.
+
+## Environments
+
+Named environments are optional. If you do not use `trv env`, `trv` keeps the current behavior and works directly with the active runtime in `.agents/skills/` and `skills.lock`.
+
+- `trv env create <name>` captures the current runtime by default
+- `--empty` creates an empty environment
+- `--shared` also writes a shareable definition to `.agents/environments/<name>.lock`
+- `trv env activate <name>` swaps the active runtime to that environment
+- if only `.agents/environments/<name>.lock` exists, `trv env activate <name>` materializes a local snapshot from that shared definition first
+- `trv env deactivate` restores the previous non-environment runtime
+- `trv env remove <name>` removes the local snapshot and shared definition, and auto-deactivates it first if needed
+
+Local environment snapshots are stored under `~/.trivium/`. Shared environment definitions are only available in project mode.

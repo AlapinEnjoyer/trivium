@@ -17,6 +17,16 @@ class GitCloneError(Exception):
         return self.stderr
 
 
+@dataclass(frozen=True, slots=True)
+class GitCheckoutError(Exception):
+    source_url: str
+    revision: str
+    stderr: str
+
+    def __str__(self) -> str:
+        return self.stderr
+
+
 @contextmanager
 def cloned_repo(source_url: str) -> Iterator[tuple[Path, str]]:
     with TemporaryDirectory(prefix="trivium-") as temp_dir:
@@ -25,9 +35,22 @@ def cloned_repo(source_url: str) -> Iterator[tuple[Path, str]]:
         yield repo_path, current_commit(repo_path)
 
 
-def clone_repository(source_url: str, destination: Path) -> None:
+@contextmanager
+def cloned_repo_at_revision(source_url: str, revision: str) -> Iterator[Path]:
+    with TemporaryDirectory(prefix="trivium-") as temp_dir:
+        repo_path = Path(temp_dir) / "repo"
+        clone_repository(source_url, repo_path, shallow=False)
+        checkout_revision(repo_path, source_url=source_url, revision=revision)
+        yield repo_path
+
+
+def clone_repository(source_url: str, destination: Path, *, shallow: bool = True) -> None:
+    command = ["git", "clone", "--quiet"]
+    if shallow:
+        command.extend(["--depth", "1", "--single-branch"])
+    command.extend([source_url, str(destination)])
     result = subprocess.run(
-        ["git", "clone", "--depth", "1", "--single-branch", "--quiet", source_url, str(destination)],
+        command,
         capture_output=True,
         text=True,
         check=False,
@@ -42,13 +65,26 @@ def clone_repository(source_url: str, destination: Path) -> None:
 
 def current_commit(repo_path: Path) -> str:
     result = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"],
+        ["git", "rev-parse", "HEAD"],
         cwd=repo_path,
         capture_output=True,
         text=True,
         check=True,
     )
     return result.stdout.strip()
+
+
+def checkout_revision(repo_path: Path, *, source_url: str, revision: str) -> None:
+    result = subprocess.run(
+        ["git", "checkout", "--quiet", revision],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+    raise GitCheckoutError(source_url=source_url, revision=revision, stderr=sanitize_git_error(result.stderr))
 
 
 def sanitize_git_error(stderr: str) -> str:

@@ -1,10 +1,13 @@
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 
 import tomli_w
 
 from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry
 from skill_trivium.skills import utc_now
+
+LOCKFILE_VERSION = 1
 
 
 def load_lockfile(lockfile_path: Path) -> LockfileData:
@@ -28,15 +31,31 @@ def load_lockfile(lockfile_path: Path) -> LockfileData:
 
 
 def write_lockfile(context: InstallContext, lockfile: LockfileData) -> None:
-    context.lockfile_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = lockfile.to_dict()
-    meta = dict(lockfile.meta)
-    meta.update(
-        {
-            "version": 1,
+    write_lockfile_path(
+        context.lockfile_path,
+        lockfile,
+        meta_updates={
+            "version": LOCKFILE_VERSION,
             "mode": context.mode,
             "updated_at": utc_now(),
-        }
+        },
     )
+
+
+def render_lockfile(lockfile: LockfileData, *, meta_updates: Mapping[str, object] | None = None) -> str:
+    payload = lockfile.to_dict()
+    meta = dict(lockfile.meta)
+    if meta_updates is not None:
+        meta.update(meta_updates)
     payload["meta"] = meta
-    context.lockfile_path.write_text(tomli_w.dumps(payload), encoding="utf-8")
+    return tomli_w.dumps(payload)
+
+
+def write_lockfile_path(
+    lockfile_path: Path,
+    lockfile: LockfileData,
+    *,
+    meta_updates: Mapping[str, object] | None = None,
+) -> None:
+    lockfile_path.parent.mkdir(parents=True, exist_ok=True)
+    lockfile_path.write_text(render_lockfile(lockfile, meta_updates=meta_updates), encoding="utf-8")

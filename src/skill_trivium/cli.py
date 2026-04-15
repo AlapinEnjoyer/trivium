@@ -14,6 +14,19 @@ from rich.table import Table
 from skill_trivium import __version__
 from skill_trivium.add import run_add
 from skill_trivium.context import ensure_storage, resolve_install_context
+from skill_trivium.environment import (
+    EnvironmentError,
+    activate_environment,
+    active_environment_name,
+    create_environment,
+    deactivate_environment,
+    describe_environment,
+    ensure_active_environment_runtime_is_clean,
+    ensure_environment_init_allowed,
+    list_environments,
+    remove_environment,
+    sync_active_environment,
+)
 from skill_trivium.lockfile import load_lockfile, write_lockfile
 from skill_trivium.models import ValidationIssue
 from skill_trivium.skills import (
@@ -40,6 +53,8 @@ app = typer.Typer(
     context_settings=HELP_CONTEXT_SETTINGS,
     no_args_is_help=True,
 )
+env_app = typer.Typer(context_settings=HELP_CONTEXT_SETTINGS, no_args_is_help=True)
+app.add_typer(env_app, name="env")
 
 
 def version_callback(show_version: bool) -> None:
@@ -121,6 +136,12 @@ def update(
     ),
 ) -> None:
     context = resolve_install_context(global_)
+    try:
+        ensure_active_environment_runtime_is_clean(context)
+    except EnvironmentError as error:
+        _print_environment_error(error)
+        raise typer.Exit(code=error.exit_code) from error
+
     lockfile = load_lockfile(context.lockfile_path)
     if not lockfile.skills:
         console.print(make_panel("info", "No Skills Installed", ["Nothing to update."]))
@@ -135,7 +156,12 @@ def update(
             )
         raise typer.Exit(code=2)
 
-    outcome = run_update(lockfile=lockfile, context=context, requested_skills=requested_skills, dry_run=dry_run)
+    try:
+        outcome = run_update(lockfile=lockfile, context=context, requested_skills=requested_skills, dry_run=dry_run)
+    except EnvironmentError as error:
+        _print_environment_error(error)
+        raise typer.Exit(code=error.exit_code) from error
+
     render_update_summary(outcome, dry_run=dry_run)
 
     exit_code = outcome.exit_code(dry_run=dry_run)
@@ -221,6 +247,12 @@ def remove(
         raise typer.Exit(code=2)
 
     context = resolve_install_context(global_)
+    try:
+        ensure_active_environment_runtime_is_clean(context)
+    except EnvironmentError as error:
+        _print_environment_error(error)
+        raise typer.Exit(code=error.exit_code) from error
+
     lockfile = load_lockfile(context.lockfile_path)
     if not lockfile.skills:
         console.print(make_panel("info", "No Skills Installed", ["Nothing to remove."]))
@@ -249,6 +281,12 @@ def remove(
         lockfile.skills.pop(name, None)
 
     write_lockfile(context, lockfile)
+    try:
+        sync_active_environment(context)
+    except EnvironmentError as error:
+        _print_environment_error(error)
+        raise typer.Exit(code=error.exit_code) from error
+
     console.print(
         make_panel(
             "ok",
@@ -277,6 +315,12 @@ def init(
         raise typer.Exit(code=2)
 
     context = resolve_install_context(global_)
+    try:
+        ensure_environment_init_allowed(context)
+    except EnvironmentError as error:
+        _print_environment_error(error)
+        raise typer.Exit(code=error.exit_code) from error
+
     destination = context.install_path_for(skill_name)
     if destination.exists():
         console.print(
@@ -309,6 +353,176 @@ def init(
 
 def main() -> None:
     app()
+
+
+@env_app.command("list")
+def list_envs(
+    global_: bool = typer.Option(
+        False,
+        "--global",
+        "-g",
+        help="List environments for the global install instead of the current project.",
+    ),
+) -> None:
+    context = resolve_install_context(global_)
+    records = list_environments(context)
+
+    table = Table(title="Skill Environments")
+    table.add_column("Name", style="bold")
+    table.add_column("Active")
+    table.add_column("Local")
+    table.add_column("Shared")
+    table.add_column("Skills")
+
+    for record in records:
+        table.add_row(
+            record.name,
+            "yes" if record.active else "",
+            "yes" if record.local else "",
+            "yes" if record.shared else "",
+            str(record.skill_count),
+        )
+
+    if not records:
+        table.caption = "No environments"
+    console.print(table)
+
+
+@env_app.command(no_args_is_help=True)
+def create(
+    name: str = typer.Argument(..., help="Name of the environment to create."),
+    empty: bool = typer.Option(
+        False, "--empty", help="Create an empty environment instead of capturing the current runtime."
+    ),
+    shared: bool = typer.Option(
+        False, "--shared", help="Also write a shared environment definition into .agents/environments/."
+    ),
+    global_: bool = typer.Option(
+        False,
+        "--global",
+        "-g",
+        help="Create the environment for the global install instead of the current project.",
+    ),
+) -> None:
+    context = resolve_install_context(global_)
+    try:
+        record = create_environment(context, name=name, empty=empty, shared=shared)
+    except EnvironmentError as error:
+        _print_environment_error(error)
+        raise typer.Exit(code=error.exit_code) from error
+
+    lines = [
+        f"Created environment '{record.name}'.",
+        f"Captured {record.skill_count} skill{'s' if record.skill_count != 1 else ''}.",
+    ]
+    if record.shared:
+        lines.append("Wrote a shared environment definition.")
+    console.print(make_panel("ok", "Environment Created", lines))
+
+
+@env_app.command(no_args_is_help=True)
+def activate(
+    name: str = typer.Argument(..., help="Name of the environment to activate."),
+    global_: bool = typer.Option(
+        False,
+        "--global",
+        "-g",
+        help="Activate an environment for the global install instead of the current project.",
+    ),
+) -> None:
+    context = resolve_install_context(global_)
+    try:
+        activate_environment(context, name)
+    except EnvironmentError as error:
+        _print_environment_error(error)
+        raise typer.Exit(code=error.exit_code) from error
+
+    console.print(make_panel("ok", "Environment Activated", [f"Activated environment '{name}'."]))
+
+
+@env_app.command()
+def deactivate(
+    global_: bool = typer.Option(
+        False,
+        "--global",
+        "-g",
+        help="Deactivate the environment for the global install instead of the current project.",
+    ),
+) -> None:
+    context = resolve_install_context(global_)
+    try:
+        was_active = deactivate_environment(context)
+    except EnvironmentError as error:
+        _print_environment_error(error)
+        raise typer.Exit(code=error.exit_code) from error
+
+    if not was_active:
+        console.print(make_panel("info", "No Active Environment", ["Nothing to deactivate."]))
+        return
+
+    console.print(make_panel("ok", "Environment Deactivated", ["Restored the default runtime."]))
+
+
+@env_app.command("remove", no_args_is_help=True)
+def remove_env(
+    name: str = typer.Argument(..., help="Name of the environment to remove."),
+    global_: bool = typer.Option(
+        False,
+        "--global",
+        "-g",
+        help="Remove the environment for the global install instead of the current project.",
+    ),
+) -> None:
+    context = resolve_install_context(global_)
+    try:
+        was_active, removed_local, removed_shared = remove_environment(context, name)
+    except EnvironmentError as error:
+        _print_environment_error(error)
+        raise typer.Exit(code=error.exit_code) from error
+
+    lines = [f"Removed environment '{name}'."]
+    if removed_local:
+        lines.append("Removed the local snapshot.")
+    if removed_shared:
+        lines.append("Removed the shared environment definition.")
+    if was_active:
+        lines.append("Deactivated it and restored the default runtime first.")
+    console.print(make_panel("ok", "Environment Removed", lines))
+
+
+@env_app.command()
+def info_env(
+    name: str | None = typer.Argument(
+        None, help="Optional environment name to inspect. Defaults to the active environment."
+    ),
+    global_: bool = typer.Option(
+        False,
+        "--global",
+        "-g",
+        help="Inspect a global environment instead of the current project.",
+    ),
+) -> None:
+    context = resolve_install_context(global_)
+    details = describe_environment(context, name)
+    if details is None:
+        active = active_environment_name(context)
+        if name is None and active is None:
+            console.print(make_panel("info", "No Active Environment", ["No environment is currently active."]))
+            return
+        target = name or active or ""
+        console.print(make_panel("err", "Environment Not Found", [f"No environment named '{target}' was found."]))
+        raise typer.Exit(code=2)
+
+    lines = [
+        f"Name: {details.name}",
+        f"Active: {'yes' if details.active else 'no'}",
+        f"Local snapshot: {'yes' if details.local else 'no'}",
+        f"Shared definition: {'yes' if details.shared else 'no'}",
+        f"Skills: {len(details.skill_names)}",
+    ]
+    if details.skill_names:
+        lines.extend(f"- {skill_name}" for skill_name in details.skill_names)
+    console.print(make_panel("info", "Environment Info", lines))
 
 
 def _render_skill_list(*, json_: bool, global_: bool) -> None:
@@ -367,3 +581,7 @@ def _validate_init_name(skill_name: str) -> ValidationIssue | None:
     if not issues:
         return None
     return issues[0]
+
+
+def _print_environment_error(error: EnvironmentError) -> None:
+    console.print(make_panel(error.kind, error.title, list(error.lines)))
