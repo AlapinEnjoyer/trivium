@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "skill-trivium"
-version = "0.2.0"
+version = "0.2.1"
 description = "A minimal CLI for managing AI agent skills"
 readme = "README.md"
 authors = [

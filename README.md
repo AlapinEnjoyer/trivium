@@ -2,6 +2,8 @@
 
 A CLI for installing, updating, and scaffolding AI agent skills that follow the [Agent Skills Specification](https://agentskills.io).
 
+`trv` validates skill frontmatter against the spec and applies a small compatibility normalization for common YAML shorthands. In particular, `metadata` is specified as a string-to-string map, so values like `true`, `false`, `null`, or numbers are accepted on install/update, converted to strings, and reported with a conversion warning.
+
 ![demo](demo.gif)
 
 ## Requirements

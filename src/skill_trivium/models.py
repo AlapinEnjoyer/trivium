@@ -114,11 +114,18 @@ class ValidationIssue:
     rule: str
 
 
+@dataclass(frozen=True, slots=True)
+class UpdateWarning:
+    skill_name: str
+    message: str
+    guidance: str | None = None
+
+
 @dataclass(slots=True)
 class SourceUpdateResult:
     refreshed: dict[str, SkillLockEntry] = field(default_factory=dict)
     updated: dict[str, SkillLockEntry] = field(default_factory=dict)
-    warnings: list[tuple[str, str]] = field(default_factory=list)
+    warnings: list[UpdateWarning] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     auth_failure: bool = False

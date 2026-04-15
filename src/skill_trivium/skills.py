@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from skill_trivium.models import ParsedSkill, ValidationIssue
+from skill_trivium.models import InstallContext, ParsedSkill, SkillLockEntry, ValidationIssue
 
 MAX_NAME_LENGTH = 64
 NAME_PATTERN = re.compile(r"^[a-z0-9]$|^[a-z0-9](?:[a-z0-9]|-(?!-)){0,62}[a-z0-9]$")
@@ -120,13 +120,45 @@ def install_skill_tree(parsed_skill: ParsedSkill, destination: Path) -> None:
     write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
 
 
-def repair_installed_skill_if_needed(parsed_skill: ParsedSkill, destination: Path) -> bool:
+def rewrite_normalized_skill_document_if_needed(parsed_skill: ParsedSkill, destination: Path) -> bool:
+    """Rewrite installed SKILL.md when normalization changed the source frontmatter.
+
+    This is intentionally narrower than a generic "repair" operation. It only
+    rewrites the installed document when validation produced compatibility
+    warnings that also changed the normalized frontmatter we want on disk.
+    """
     if not parsed_skill.warnings:
         return False
     if not destination.is_dir():
         return False
     write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
     return True
+
+
+def build_lock_entry(
+    *,
+    parsed_skill: ParsedSkill,
+    source_url: str,
+    commit_hash: str,
+    skills_path: str,
+    context: InstallContext,
+    installed_at: str,
+) -> SkillLockEntry:
+    """Create the normalized lockfile entry for an installed skill."""
+    return SkillLockEntry(
+        name=parsed_skill.name,
+        source_url=source_url,
+        commit_hash=commit_hash,
+        content_hash=hash_parsed_skill(parsed_skill),
+        skills_path=skills_path,
+        install_path=context.relative_install_path(parsed_skill.name),
+        description=parsed_skill.description,
+        license=parsed_skill.license,
+        compatibility=parsed_skill.compatibility,
+        allowed_tools=parsed_skill.allowed_tools,
+        installed_at=installed_at,
+        metadata=parsed_skill.metadata,
+    )
 
 
 def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[ValidationIssue]]:
@@ -246,8 +278,9 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
             )
         else:
             normalized_metadata = {}
+            converted_metadata_values = False
             for key, value in metadata.items():
-                if not isinstance(key, str) or not isinstance(value, str):
+                if not isinstance(key, str):
                     issues.append(
                         ValidationIssue(
                             skill_name=skill_name,
@@ -257,7 +290,23 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
                     )
                     normalized_metadata = None
                     break
-                normalized_metadata[key] = value
+                normalized_value, was_converted = _normalize_metadata_value(value)
+                if normalized_value is None:
+                    issues.append(
+                        ValidationIssue(
+                            skill_name=skill_name,
+                            field="metadata",
+                            rule="The 'metadata' field must contain only string keys and string values.",
+                        )
+                    )
+                    normalized_metadata = None
+                    break
+                normalized_metadata[key] = normalized_value
+                converted_metadata_values = converted_metadata_values or was_converted
+            if normalized_metadata is not None and converted_metadata_values:
+                skill_warnings.append(
+                    "'metadata' contained non-string primitive values and has been converted to strings."
+                )
 
     if issues:
         return None, issues
@@ -401,3 +450,19 @@ def _validate_optional_string(
         return None
 
     return stripped
+
+
+def _normalize_metadata_value(value: object) -> tuple[str | None, bool]:
+    if isinstance(value, str):
+        return value, False
+    if value is None or isinstance(value, (bool, int, float)):
+        return _yaml_scalar_to_string(value), True
+    return None, False
+
+
+def _yaml_scalar_to_string(value: bool | int | float | None) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)

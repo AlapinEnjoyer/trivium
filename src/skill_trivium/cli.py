@@ -1,7 +1,6 @@
 import json
 import shutil
 import sys
-from pathlib import Path
 
 import questionary
 import typer
@@ -13,20 +12,13 @@ from rich.rule import Rule
 from rich.table import Table
 
 from skill_trivium import __version__
+from skill_trivium.add import run_add
 from skill_trivium.context import ensure_storage, resolve_install_context
-from skill_trivium.git import GitCloneError, cloned_repo
 from skill_trivium.lockfile import load_lockfile, write_lockfile
-from skill_trivium.models import InstallContext, ParsedSkill, SkillLockEntry, ValidationIssue
+from skill_trivium.models import ValidationIssue
 from skill_trivium.skills import (
     build_skill_markdown,
-    discover_skills_path,
-    enumerate_skill_directories,
-    hash_parsed_skill,
-    install_skill_tree,
     parse_skill_document,
-    repair_installed_skill_if_needed,
-    utc_now,
-    validate_skill_directory,
     validate_skill_name,
 )
 from skill_trivium.ui import (
@@ -97,178 +89,19 @@ def add(
         help="Install to ~/.agents/skills/ regardless of git context.",
     ),
 ) -> None:
-    requested_names = _parse_add_skill_names(ctx, all_, skills)
-    context = resolve_install_context(global_)
-    lockfile = load_lockfile(context.lockfile_path)
-
-    installed: list[str] = []
-    would_install: list[str] = []
-    skipped: dict[str, str] = {}
-    failed: list[str] = []
-    validation_issues: list[ValidationIssue] = []
-
-    with progress_bar() as progress:
-        task = progress.add_task("Cloning repository", total=None)
-        try:
-            with cloned_repo(url) as (repo_path, commit_hash):
-                progress.update(task, completed=1)
-                resolved = discover_skills_path(repo_path, path)
-                if resolved is None:
-                    title = "Skill Discovery Failed" if path is None else "Invalid Skills Path"
-                    lines = (
-                        [
-                            "No skill directories containing SKILL.md were found in the repository root or repo/skills/.",
-                            "Re-run the command with --path to point at the skills container directory explicitly.",
-                        ]
-                        if path is None
-                        else [
-                            f"The path '{path}' does not resolve to a skills container directory inside the repository.",
-                            "Use --path to point at the directory whose children are individual skills.",
-                        ]
-                    )
-                    console.print(make_panel("warn" if path is None else "err", title, lines))
-                    raise typer.Exit(code=1 if path is None else 2)
-
-                skills_container, skills_path = resolved
-                candidates = enumerate_skill_directories(skills_container)
-                candidate_map = {candidate.name: candidate for candidate in candidates}
-
-                target_directories: list[Path]
-                if requested_names is None:
-                    target_directories = candidates
-                else:
-                    missing_names = [name for name in requested_names if name not in candidate_map]
-                    if missing_names:
-                        for name in missing_names:
-                            issue = ValidationIssue(
-                                skill_name=name,
-                                field="name",
-                                rule="The requested skill was not found in the remote repository.",
-                            )
-                            validation_issues.append(issue)
-                            print_validation_issue(issue)
-                            failed.append(name)
-                    target_directories = [candidate_map[name] for name in requested_names if name in candidate_map]
-
-                parsed_skills: list[ParsedSkill] = []
-                for skill_dir in target_directories:
-                    parsed_skill, issues = validate_skill_directory(skill_dir)
-                    if issues:
-                        validation_issues.extend(issues)
-                        for issue in issues:
-                            print_validation_issue(issue)
-                        failed.append(skill_dir.name)
-                        continue
-                    parsed_skills.append(parsed_skill)
-
-                pending_installs: list[ParsedSkill] = []
-                conflicts: list[tuple[ParsedSkill, SkillLockEntry]] = []
-                repaired: list[str] = []
-                for parsed_skill in parsed_skills:
-                    existing = lockfile.skills.get(parsed_skill.name)
-                    if existing is None:
-                        pending_installs.append(parsed_skill)
-                        continue
-                    if existing.source_url == url:
-                        if not dry_run and repair_installed_skill_if_needed(
-                            parsed_skill, context.install_path_for(parsed_skill.name)
-                        ):
-                            repaired.append(parsed_skill.name)
-                            for warning in parsed_skill.warnings:
-                                console.print(make_panel("warn", f"Conversion Warning: {parsed_skill.name}", [warning]))
-                        skipped[parsed_skill.name] = "already installed from the same source"
-                        continue
-                    conflicts.append((parsed_skill, existing))
-
-                # Stop the live display before printing conflict panels or
-                # prompting so Rich and Questionary do not compete for the terminal.
-                progress.stop()
-
-                if conflicts and not yes and not _is_interactive_terminal():
-                    for parsed_skill, existing in conflicts:
-                        console.print(_conflict_panel(parsed_skill, existing, url, commit_hash))
-                    raise typer.Exit(code=4)
-
-                replaced: list[str] = []
-                if yes:
-                    for parsed_skill, _existing in conflicts:
-                        pending_installs.append(parsed_skill)
-                        replaced.append(parsed_skill.name)
-                        skipped.pop(parsed_skill.name, None)
-                else:
-                    for parsed_skill, existing in conflicts:
-                        console.print(_conflict_panel(parsed_skill, existing, url, commit_hash))
-                        choice = questionary.select(
-                            f"Resolve conflict for '{parsed_skill.name}'",
-                            choices=["Keep existing", "Replace with new", "Skip"],
-                        ).ask()
-                        if choice == "Replace with new":
-                            pending_installs.append(parsed_skill)
-                            replaced.append(parsed_skill.name)
-                        elif choice == "Skip":
-                            skipped[parsed_skill.name] = "skipped"
-                        else:
-                            skipped[parsed_skill.name] = "kept existing"
-
-                for parsed_skill in pending_installs:
-                    installed_at = utc_now()
-                    entry = _entry_from_skill(
-                        parsed_skill=parsed_skill,
-                        source_url=url,
-                        commit_hash=commit_hash,
-                        skills_path=skills_path,
-                        context=context,
-                        installed_at=installed_at,
-                    )
-                    if dry_run:
-                        would_install.append(parsed_skill.name)
-                        continue
-                    ensure_storage(context)
-                    destination = context.install_path_for(parsed_skill.name)
-                    install_skill_tree(parsed_skill, destination)
-                    for warning in parsed_skill.warnings:
-                        console.print(make_panel("warn", f"Conversion Warning: {parsed_skill.name}", [warning]))
-                    lockfile.skills[parsed_skill.name] = entry
-                    installed.append(parsed_skill.name)
-
-                if pending_installs and not dry_run:
-                    write_lockfile(context, lockfile)
-
-                if replaced and not dry_run:
-                    console.print(
-                        make_panel(
-                            "info",
-                            "Conflicts Replaced",
-                            [f"Replaced skill '{name}' with the incoming source." for name in sorted(replaced)],
-                        )
-                    )
-                if repaired:
-                    console.print(
-                        make_panel(
-                            "info",
-                            "Normalized Installed Skills",
-                            [
-                                f"Rewrote installed SKILL.md for '{name}' to match normalized metadata."
-                                for name in repaired
-                            ],
-                        )
-                    )
-        except GitCloneError as error:
-            lines = [error.stderr]
-            if error.guidance is not None:
-                lines.append(error.guidance)
-            console.print(make_panel("warn" if error.auth_failure else "err", "Git Clone Failed", lines))
-            raise typer.Exit(code=5 if error.auth_failure else 1) from error
-
-    summary_lines = _summary_lines(installed, would_install, skipped, failed)
-    if summary_lines:
-        title = "Dry Run" if dry_run else "Add Summary"
-        console.print(make_panel("ok" if not failed else "info", title, summary_lines))
-
-    if validation_issues:
-        raise typer.Exit(code=2)
-    if dry_run and would_install:
-        raise typer.Exit(code=3)
+    run_add(
+        ctx=ctx,
+        url=url,
+        all_=all_,
+        skills=skills,
+        path=path,
+        yes=yes,
+        dry_run=dry_run,
+        global_=global_,
+        progress_factory=progress_bar,
+        is_interactive_terminal=_is_interactive_terminal,
+        select_conflict=_select_add_conflict,
+    )
 
 
 @app.command()
@@ -478,81 +311,6 @@ def main() -> None:
     app()
 
 
-def _parse_add_skill_names(ctx: typer.Context, all_: bool, skills_value: str | None) -> list[str] | None:
-    extra_args = list(dict.fromkeys(ctx.args))
-    if all_ and skills_value is not None:
-        console.print(make_panel("err", "Invalid Arguments", ["Use either --all or --skills, not both."]))
-        raise typer.Exit(code=2)
-    if not all_ and skills_value is None:
-        console.print(make_panel("err", "Invalid Arguments", ["Use either --all or --skills."]))
-        raise typer.Exit(code=2)
-    if all_ and extra_args:
-        console.print(make_panel("err", "Invalid Arguments", ["Skill names may only follow the --skills flag."]))
-        raise typer.Exit(code=2)
-    if all_:
-        return None
-
-    requested_names = [skills_value, *extra_args] if skills_value is not None else []
-    if not requested_names:
-        console.print(make_panel("err", "Invalid Arguments", ["Provide one or more skill names after --skills."]))
-        raise typer.Exit(code=2)
-
-    return list(dict.fromkeys(requested_names))
-
-
-def _entry_from_skill(
-    *,
-    parsed_skill: ParsedSkill,
-    source_url: str,
-    commit_hash: str,
-    skills_path: str,
-    context: InstallContext,
-    installed_at: str,
-) -> SkillLockEntry:
-    return SkillLockEntry(
-        name=parsed_skill.name,
-        source_url=source_url,
-        commit_hash=commit_hash,
-        content_hash=hash_parsed_skill(parsed_skill),
-        skills_path=skills_path,
-        install_path=context.relative_install_path(parsed_skill.name),
-        description=parsed_skill.description,
-        license=parsed_skill.license,
-        compatibility=parsed_skill.compatibility,
-        allowed_tools=parsed_skill.allowed_tools,
-        installed_at=installed_at,
-        metadata=parsed_skill.metadata,
-    )
-
-
-def _summary_lines(
-    installed: list[str],
-    would_install: list[str],
-    skipped: dict[str, str],
-    failed: list[str],
-) -> list[str]:
-    lines: list[str] = []
-    lines.extend(f"Installed: {name}" for name in sorted(installed))
-    lines.extend(f"Would install: {name}" for name in sorted(would_install))
-    lines.extend(f"Skipped: {name} ({reason})" for name, reason in sorted(skipped.items()))
-    lines.extend(f"Failed: {name}" for name in sorted(set(failed)))
-    return lines
-
-
-def _conflict_panel(
-    parsed_skill: ParsedSkill,
-    existing: SkillLockEntry,
-    incoming_source_url: str,
-    incoming_commit_hash: str,
-) -> Panel:
-    lines = [
-        f"Skill '{parsed_skill.name}' already exists from a different source.",
-        f"Existing: {existing.source_url} @ {existing.commit_hash} (installed {existing.installed_at})",
-        f"Incoming: {incoming_source_url} @ {incoming_commit_hash}",
-    ]
-    return make_panel("warn", f"Conflict: {parsed_skill.name}", lines)
-
-
 def _render_skill_list(*, json_: bool, global_: bool) -> None:
     context = resolve_install_context(global_)
     lockfile = load_lockfile(context.lockfile_path)
@@ -584,6 +342,13 @@ def _render_skill_list(*, json_: bool, global_: bool) -> None:
 
 def _is_interactive_terminal() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _select_add_conflict(skill_name: str) -> str | None:
+    return questionary.select(
+        f"Resolve conflict for '{skill_name}'",
+        choices=["Keep existing", "Replace with new", "Skip"],
+    ).ask()
 
 
 def _confirm(prompt: str) -> bool:

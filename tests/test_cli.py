@@ -222,6 +222,59 @@ def test_add_normalizes_yaml_list_allowed_tools_in_installed_skill(
     assert lockfile.skills["learn"].allowed_tools == "Bash Read Write"
 
 
+def test_add_normalizes_yaml_scalar_metadata_values_in_installed_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "capture-api-response-test-fixture": "\n".join(
+                [
+                    "---",
+                    "name: capture-api-response-test-fixture",
+                    "description: |",
+                    "  Capture API response test fixture.",
+                    "metadata:",
+                    "  internal: true",
+                    "  retries: 2",
+                    "  ratio: 1.5",
+                    "  retired: null",
+                    "---",
+                    "",
+                    "## Instructions",
+                    "",
+                    "Use this skill carefully.",
+                ]
+            )
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert "Conversion Warning: capture-api-response-test-fixture" in result.output
+
+    installed_path = project_root / ".agents" / "skills" / "capture-api-response-test-fixture" / "SKILL.md"
+    frontmatter, _ = parse_skill_document(installed_path)
+    assert frontmatter["metadata"] == {
+        "internal": "true",
+        "retries": "2",
+        "ratio": "1.5",
+        "retired": "null",
+    }
+
+    lockfile = load_lockfile(project_root / "skills.lock")
+    assert lockfile.skills["capture-api-response-test-fixture"].metadata == {
+        "internal": "true",
+        "retries": "2",
+        "ratio": "1.5",
+        "retired": "null",
+    }
+
+
 def test_add_conflict_without_yes_exits_four_in_non_interactive_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -700,6 +753,66 @@ def test_update_warns_when_skill_path_or_skill_is_missing(tmp_path: Path, monkey
     assert result.exit_code == 0, result.output
     assert "Update Warning: alpha-skill" in result.output
     assert "re-run `trivium add".lower() in result.output.lower()
+
+
+def test_add_same_source_readd_repairs_installed_skill_metadata_scalar_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "capture-api-response-test-fixture": "\n".join(
+                [
+                    "---",
+                    "name: capture-api-response-test-fixture",
+                    "description: |",
+                    "  Capture API response test fixture.",
+                    "metadata:",
+                    "  author: example-org",
+                    "  internal: true",
+                    "---",
+                    "",
+                    "## Instructions",
+                    "",
+                    "Use this skill carefully.",
+                ]
+            )
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert add_result.exit_code == 0, add_result.output
+
+    installed_path = project_root / ".agents" / "skills" / "capture-api-response-test-fixture" / "SKILL.md"
+    write_skill(
+        installed_path,
+        "\n".join(
+            [
+                "---",
+                "name: capture-api-response-test-fixture",
+                "description: |",
+                "  Capture API response test fixture.",
+                "metadata:",
+                "  author: example-org",
+                "  internal: true",
+                "---",
+                "",
+                "## Instructions",
+                "",
+                "Use this skill carefully.",
+            ]
+        ),
+    )
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert "Conversion Warning: capture-api-response-test-fixture" in result.output
+    frontmatter, _ = parse_skill_document(installed_path)
+    assert frontmatter["metadata"] == {"author": "example-org", "internal": "true"}
 
 
 def test_global_mode_uses_home_agents_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

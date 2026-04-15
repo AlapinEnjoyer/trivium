@@ -1,29 +1,29 @@
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from skill_trivium.context import ensure_storage
 from skill_trivium.git import GitCloneError, cloned_repo
 from skill_trivium.lockfile import write_lockfile
-from skill_trivium.models import InstallContext, LockfileData, ParsedSkill, SkillLockEntry, ValidationIssue
+from skill_trivium.models import (
+    InstallContext,
+    LockfileData,
+    ParsedSkill,
+    SkillLockEntry,
+    SourceUpdateResult,
+    UpdateWarning,
+    ValidationIssue,
+)
 from skill_trivium.skills import (
+    build_lock_entry,
     hash_parsed_skill,
     hash_skill_directory,
     install_skill_tree,
-    repair_installed_skill_if_needed,
+    rewrite_normalized_skill_document_if_needed,
     validate_skill_directory,
 )
 from skill_trivium.ui import console, make_panel, print_validation_issue, progress_bar, shorten_source
-
-
-@dataclass(slots=True)
-class SourceUpdateResult:
-    refreshed: dict[str, SkillLockEntry] = field(default_factory=dict)
-    updated: dict[str, SkillLockEntry] = field(default_factory=dict)
-    warnings: list[tuple[str, str]] = field(default_factory=list)
-    validation_issues: list[ValidationIssue] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    auth_failure: bool = False
 
 
 @dataclass(slots=True)
@@ -124,16 +124,16 @@ def _apply_update_result(
     dry_run: bool,
     outcome: UpdateOutcome,
 ) -> None:
-    for skill_name, warning in result.warnings:
+    for warning in result.warnings:
         outcome.warning_count += 1
+        lines = [warning.message]
+        if warning.guidance is not None:
+            lines.append(warning.guidance)
         console.print(
             make_panel(
                 "warn",
-                f"Update Warning: {skill_name}",
-                [
-                    warning,
-                    f"Re-run `trivium add {source_url}` if the skill moved elsewhere in the repository.",
-                ],
+                f"Update Warning: {warning.skill_name}",
+                lines,
             )
         )
 
@@ -168,14 +168,16 @@ def _update_source_group(
 ) -> SourceUpdateResult:
     result = SourceUpdateResult()
     try:
-        with cloned_repo(entries[0].source_url) as (repo_path, commit_hash):
+        source_url = entries[0].source_url
+        with cloned_repo(source_url) as (repo_path, commit_hash):
             for entry in entries:
                 container = repo_path if entry.skills_path == "." else repo_path / entry.skills_path
                 if not container.is_dir():
                     result.warnings.append(
-                        (
-                            entry.name,
-                            f"The registered skills path '{entry.skills_path}' no longer exists for this skill.",
+                        UpdateWarning(
+                            skill_name=entry.name,
+                            message=f"The registered skills path '{entry.skills_path}' no longer exists for this skill.",
+                            guidance=f"Re-run `trivium add {source_url}` if the skill moved elsewhere in the repository.",
                         )
                     )
                     continue
@@ -183,9 +185,10 @@ def _update_source_group(
                 skill_dir = container / entry.name
                 if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
                     result.warnings.append(
-                        (
-                            entry.name,
-                            f"The skill was not found at '{entry.skills_path}/{entry.name}'.",
+                        UpdateWarning(
+                            skill_name=entry.name,
+                            message=f"The skill was not found at '{entry.skills_path}/{entry.name}'.",
+                            guidance=f"Re-run `trivium add {source_url}` if the skill moved elsewhere in the repository.",
                         )
                     )
                     continue
@@ -199,23 +202,37 @@ def _update_source_group(
                 if not _entry_needs_refresh(entry, parsed_skill, destination):
                     if not dry_run:
                         try:
-                            if repair_installed_skill_if_needed(parsed_skill, destination):
+                            if rewrite_normalized_skill_document_if_needed(parsed_skill, destination):
                                 for warning in parsed_skill.warnings:
-                                    result.warnings.append((parsed_skill.name, warning))
+                                    result.warnings.append(UpdateWarning(skill_name=parsed_skill.name, message=warning))
                         except OSError as error:
                             result.errors.append(f"{entry.name}: {error}")
                             continue
                     if entry.content_hash is None or entry.commit_hash != commit_hash:
-                        result.refreshed[entry.name] = _refreshed_entry(entry, parsed_skill, context, commit_hash)
+                        result.refreshed[entry.name] = build_lock_entry(
+                            parsed_skill=parsed_skill,
+                            source_url=entry.source_url,
+                            commit_hash=commit_hash,
+                            skills_path=entry.skills_path,
+                            context=context,
+                            installed_at=entry.installed_at,
+                        )
                     continue
 
-                updated_entry = _refreshed_entry(entry, parsed_skill, context, commit_hash)
+                updated_entry = build_lock_entry(
+                    parsed_skill=parsed_skill,
+                    source_url=entry.source_url,
+                    commit_hash=commit_hash,
+                    skills_path=entry.skills_path,
+                    context=context,
+                    installed_at=entry.installed_at,
+                )
                 if not dry_run:
                     try:
                         ensure_storage(context)
                         install_skill_tree(parsed_skill, destination)
                         for warning in parsed_skill.warnings:
-                            result.warnings.append((parsed_skill.name, warning))
+                            result.warnings.append(UpdateWarning(skill_name=parsed_skill.name, message=warning))
                     except OSError as error:
                         result.errors.append(f"{entry.name}: {error}")
                         continue
@@ -230,7 +247,7 @@ def _update_source_group(
     return result
 
 
-def _entry_needs_refresh(entry: SkillLockEntry, parsed_skill: ParsedSkill, destination) -> bool:
+def _entry_needs_refresh(entry: SkillLockEntry, parsed_skill: ParsedSkill, destination: Path) -> bool:
     expected_hash = hash_parsed_skill(parsed_skill)
     if entry.content_hash is None:
         if not destination.is_dir():
@@ -239,25 +256,3 @@ def _entry_needs_refresh(entry: SkillLockEntry, parsed_skill: ParsedSkill, desti
     if expected_hash != entry.content_hash:
         return True
     return not destination.is_dir()
-
-
-def _refreshed_entry(
-    entry: SkillLockEntry,
-    parsed_skill: ParsedSkill,
-    context: InstallContext,
-    commit_hash: str,
-) -> SkillLockEntry:
-    return SkillLockEntry(
-        name=parsed_skill.name,
-        source_url=entry.source_url,
-        commit_hash=commit_hash,
-        content_hash=hash_parsed_skill(parsed_skill),
-        skills_path=entry.skills_path,
-        install_path=context.relative_install_path(parsed_skill.name),
-        description=parsed_skill.description,
-        license=parsed_skill.license,
-        compatibility=parsed_skill.compatibility,
-        allowed_tools=parsed_skill.allowed_tools,
-        installed_at=entry.installed_at,
-        metadata=parsed_skill.metadata,
-    )
