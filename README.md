@@ -142,9 +142,11 @@ trv init my-skill --full    # Include scripts/, references/, assets/
 ```bash
 trv env list
 trv env create office
+trv env create office --global
 trv env create office --shared
 trv env create scratch --empty
 trv env activate office
+trv env activate office --global
 trv env info
 trv env deactivate
 trv env remove office
@@ -177,9 +179,12 @@ This enables `trv update` to fetch newer versions from the original sources.
 Named environments are optional. If you do not use `trv env`, `trv` keeps the current behavior and works directly with the active runtime in `.agents/skills/` and `skills.lock`.
 
 - `trv env create <name>` captures the current runtime by default
+- `trv env create <name> --global` stores the environment in `~/.trivium/` so it can be activated from any project later
 - `--empty` creates an empty environment
 - `--shared` also writes a shareable definition to `.agents/environments/<name>.lock`
 - `trv env activate <name>` swaps the active runtime to that environment
+- project activation also falls back to globally stored environments when no project-scoped env with that name exists
+- `trv env activate <name> --global` activates that environment into `~/.agents/skills/`
 - if only `.agents/environments/<name>.lock` exists, `trv env activate <name>` materializes a local snapshot from that shared definition first
 - `trv env deactivate` restores the previous non-environment runtime
 - `trv env remove <name>` removes the local snapshot and shared definition, and auto-deactivates it first if needed

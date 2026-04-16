@@ -65,7 +65,7 @@ def version_callback(show_version: bool) -> None:
 
 @app.callback()
 def main_callback(
-    version_flag: bool = typer.Option(
+    _version_flag: bool = typer.Option(
         None,
         "--version",
         "-V",
@@ -361,11 +361,11 @@ def list_envs(
         False,
         "--global",
         "-g",
-        help="List environments for the global install instead of the current project.",
+        help="List globally stored environments instead of project-scoped ones.",
     ),
 ) -> None:
-    context = resolve_install_context(global_)
-    records = list_environments(context)
+    context = resolve_install_context(False)
+    records = list_environments(context, scope="global" if global_ else None)
 
     table = Table(title="Skill Environments")
     table.add_column("Name", style="bold")
@@ -401,12 +401,12 @@ def create(
         False,
         "--global",
         "-g",
-        help="Create the environment for the global install instead of the current project.",
+        help="Store the environment globally in ~/.trivium so it can be activated from any project.",
     ),
 ) -> None:
-    context = resolve_install_context(global_)
+    context = resolve_install_context(False)
     try:
-        record = create_environment(context, name=name, empty=empty, shared=shared)
+        record = create_environment(context, name=name, empty=empty, shared=shared, scope="global" if global_ else None)
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
@@ -427,7 +427,7 @@ def activate(
         False,
         "--global",
         "-g",
-        help="Activate an environment for the global install instead of the current project.",
+        help="Activate into the global runtime (~/.agents/skills) instead of the current project runtime.",
     ),
 ) -> None:
     context = resolve_install_context(global_)
@@ -446,7 +446,7 @@ def deactivate(
         False,
         "--global",
         "-g",
-        help="Deactivate the environment for the global install instead of the current project.",
+        help="Deactivate the global runtime environment instead of the current project runtime.",
     ),
 ) -> None:
     context = resolve_install_context(global_)
@@ -470,12 +470,16 @@ def remove_env(
         False,
         "--global",
         "-g",
-        help="Remove the environment for the global install instead of the current project.",
+        help="Remove the globally stored environment instead of the project-scoped one.",
     ),
 ) -> None:
-    context = resolve_install_context(global_)
+    context = resolve_install_context(False)
     try:
-        was_active, removed_local, removed_shared = remove_environment(context, name)
+        was_active, removed_local, removed_shared = remove_environment(
+            context,
+            name,
+            scope="global" if global_ else None,
+        )
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
@@ -499,13 +503,13 @@ def info_env(
         False,
         "--global",
         "-g",
-        help="Inspect a global environment instead of the current project.",
+        help="Inspect a globally stored environment instead of a project-scoped one.",
     ),
 ) -> None:
-    context = resolve_install_context(global_)
-    details = describe_environment(context, name)
+    context = resolve_install_context(False)
+    details = describe_environment(context, name, scope="global" if global_ else None)
     if details is None:
-        active = active_environment_name(context)
+        active = active_environment_name(context) if not global_ else None
         if name is None and active is None:
             console.print(make_panel("info", "No Active Environment", ["No environment is currently active."]))
             return

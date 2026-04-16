@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 
 import tomli_w
 
@@ -27,6 +28,7 @@ DEFAULT_DIR = "default"
 STATE_FILE = "state.toml"
 LOCKFILE_NAME = "skills.lock"
 SHARED_ENVS_DIR = "environments"
+EnvironmentScope = Literal["project", "global"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +94,7 @@ def active_environment_name(context: InstallContext) -> str | None:
 
 
 def load_environment_state(context: InstallContext) -> EnvironmentState:
-    state_path = environment_paths(context).state_path
+    state_path = environment_paths(context, scope=context.mode).state_path
     if not state_path.exists():
         return EnvironmentState()
 
@@ -104,7 +106,7 @@ def load_environment_state(context: InstallContext) -> EnvironmentState:
 
 
 def write_environment_state(context: InstallContext, state: EnvironmentState) -> None:
-    state_path = environment_paths(context).state_path
+    state_path = environment_paths(context, scope=context.mode).state_path
     if state.active is None:
         if state_path.exists():
             state_path.unlink()
@@ -114,9 +116,11 @@ def write_environment_state(context: InstallContext, state: EnvironmentState) ->
     state_path.write_text(tomli_w.dumps({"active": state.active}), encoding="utf-8")
 
 
-def list_environments(context: InstallContext) -> list[EnvironmentRecord]:
-    paths = environment_paths(context)
+def list_environments(context: InstallContext, *, scope: EnvironmentScope | None = None) -> list[EnvironmentRecord]:
+    env_scope = scope or context.mode
+    paths = environment_paths(context, scope=env_scope)
     state = load_environment_state(context)
+    active_name = state.active if env_scope == context.mode else None
     names = set(_local_environment_names(paths))
     names.update(_shared_environment_names(paths))
 
@@ -126,7 +130,7 @@ def list_environments(context: InstallContext) -> list[EnvironmentRecord]:
         records.append(
             EnvironmentRecord(
                 name=name,
-                active=name == state.active,
+                active=name == active_name,
                 local=paths.env_dir(name).is_dir(),
                 shared=_shared_environment_path(paths, name) is not None,
                 skill_count=len(lockfile.skills),
@@ -135,13 +139,18 @@ def list_environments(context: InstallContext) -> list[EnvironmentRecord]:
     return records
 
 
-def describe_environment(context: InstallContext, name: str | None = None) -> EnvironmentDetails | None:
+def describe_environment(
+    context: InstallContext,
+    name: str | None = None,
+    *,
+    scope: EnvironmentScope | None = None,
+) -> EnvironmentDetails | None:
     state = load_environment_state(context)
     target_name = name or state.active
     if target_name is None:
         return None
 
-    paths = environment_paths(context)
+    paths = environment_paths(context, scope=scope or context.mode)
     local = paths.env_dir(target_name).is_dir()
     shared = _shared_environment_path(paths, target_name) is not None
     if not local and not shared:
@@ -150,7 +159,7 @@ def describe_environment(context: InstallContext, name: str | None = None) -> En
     lockfile = _load_preferred_environment_lockfile(paths, target_name)
     return EnvironmentDetails(
         name=target_name,
-        active=target_name == state.active,
+        active=(scope or context.mode) == context.mode and target_name == state.active,
         local=local,
         shared=shared,
         skill_names=tuple(sorted(lockfile.skills)),
@@ -163,9 +172,11 @@ def create_environment(
     name: str,
     empty: bool,
     shared: bool,
+    scope: EnvironmentScope | None = None,
 ) -> EnvironmentRecord:
     _validate_or_raise(name)
-    paths = environment_paths(context)
+    env_scope = scope or context.mode
+    paths = environment_paths(context, scope=env_scope)
     local_dir = paths.env_dir(name)
     shared_path = _shared_environment_file(paths, name)
     local_exists = local_dir.is_dir()
@@ -193,8 +204,8 @@ def create_environment(
             mode=context.mode,
         )
         if shared:
-            _write_shared_definition(context, name=name, lockfile=lockfile)
-        return _build_environment_record(paths, name, active=False)
+            _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
+        return _build_environment_record(paths, name, active=env_scope == context.mode and False)
 
     if local_exists and not shared:
         raise EnvironmentError(
@@ -216,26 +227,35 @@ def create_environment(
 
     if local_exists and shared and not shared_exists:
         lockfile = load_lockfile(local_dir / LOCKFILE_NAME)
-        _write_shared_definition(context, name=name, lockfile=lockfile)
-        return _build_environment_record(paths, name, active=load_environment_state(context).active == name)
+        _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
+        return _build_environment_record(
+            paths,
+            name,
+            active=env_scope == context.mode and load_environment_state(context).active == name,
+        )
 
-    snapshot = load_runtime_snapshot(context, require_content_hashes=True)
+    capture_context = context if context.mode == "project" else _project_capture_context(context)
+    snapshot = load_runtime_snapshot(capture_context, require_content_hashes=True)
     _write_environment_snapshot(
         local_dir,
         lockfile=snapshot.lockfile,
         create_skills_dir=True,
         environment_name=name,
-        mode=context.mode,
+        mode=capture_context.mode,
     )
     _copy_directory(snapshot.skills_dir, local_dir / "skills")
     if shared:
-        _write_shared_definition(context, name=name, lockfile=snapshot.lockfile)
-    return _build_environment_record(paths, name, active=load_environment_state(context).active == name)
+        _write_shared_definition(context, name=name, lockfile=snapshot.lockfile, scope=env_scope)
+    return _build_environment_record(
+        paths,
+        name,
+        active=env_scope == context.mode and load_environment_state(context).active == name,
+    )
 
 
 def activate_environment(context: InstallContext, name: str) -> None:
     _validate_or_raise(name)
-    paths = environment_paths(context)
+    paths = environment_paths(context, scope=context.mode)
     state = load_environment_state(context)
     if state.active == name:
         raise EnvironmentError(
@@ -264,7 +284,7 @@ def activate_environment(context: InstallContext, name: str) -> None:
 
 
 def deactivate_environment(context: InstallContext) -> bool:
-    paths = environment_paths(context)
+    paths = environment_paths(context, scope=context.mode)
     state = load_environment_state(context)
     if state.active is None:
         return False
@@ -285,7 +305,7 @@ def deactivate_environment(context: InstallContext) -> bool:
 
 
 def deactivate_environment_without_sync(context: InstallContext) -> bool:
-    paths = environment_paths(context)
+    paths = environment_paths(context, scope=context.mode)
     state = load_environment_state(context)
     if state.active is None:
         return False
@@ -304,9 +324,15 @@ def deactivate_environment_without_sync(context: InstallContext) -> bool:
     return True
 
 
-def remove_environment(context: InstallContext, name: str) -> tuple[bool, bool, bool]:
+def remove_environment(
+    context: InstallContext,
+    name: str,
+    *,
+    scope: EnvironmentScope | None = None,
+) -> tuple[bool, bool, bool]:
     _validate_or_raise(name)
-    paths = environment_paths(context)
+    env_scope = scope or context.mode
+    paths = environment_paths(context, scope=env_scope)
     local_path = paths.env_dir(name)
     shared_path = _shared_environment_path(paths, name)
     local_exists = local_path.is_dir()
@@ -318,7 +344,7 @@ def remove_environment(context: InstallContext, name: str) -> tuple[bool, bool, 
             exit_code=2,
         )
 
-    was_active = active_environment_name(context) == name
+    was_active = env_scope == context.mode and active_environment_name(context) == name
     if was_active:
         deactivate_environment_without_sync(context)
 
@@ -356,7 +382,7 @@ def sync_active_environment(context: InstallContext) -> str | None:
     if active is None:
         return None
 
-    paths = environment_paths(context)
+    paths = environment_paths(context, scope=context.mode)
     local_dir = paths.env_dir(active)
     if not local_dir.is_dir():
         raise EnvironmentError(
@@ -379,7 +405,7 @@ def sync_active_environment(context: InstallContext) -> str | None:
     )
     _rewrite_runtime_lockfile(context, snapshot.lockfile, environment_name=active)
     if _shared_environment_path(paths, active) is not None:
-        _write_shared_definition(context, name=active, lockfile=snapshot.lockfile)
+        _write_shared_definition(context, name=active, lockfile=snapshot.lockfile, scope=context.mode)
     return active
 
 
@@ -455,8 +481,8 @@ def load_runtime_snapshot(context: InstallContext, *, require_content_hashes: bo
     return RuntimeSnapshot(lockfile=lockfile, skills_dir=skills_dir, lockfile_present=lockfile_present)
 
 
-def environment_paths(context: InstallContext) -> EnvironmentPaths:
-    if context.mode == "global":
+def environment_paths(context: InstallContext, *, scope: EnvironmentScope) -> EnvironmentPaths:
+    if scope == "global":
         root = Path.home() / TRIVIUM_HOME_DIR / GLOBAL_DIR
         shared_envs_dir: Path | None = None
     else:
@@ -490,11 +516,21 @@ def _copy_directory(source: Path, destination: Path) -> None:
 
 
 def _ensure_environment_available(context: InstallContext, name: str) -> None:
-    paths = environment_paths(context)
-    if paths.env_dir(name).is_dir():
+    runtime_paths = environment_paths(context, scope=context.mode)
+    if runtime_paths.env_dir(name).is_dir():
         return
 
-    shared_path = _shared_environment_path(paths, name)
+    if context.mode == "project":
+        global_paths = environment_paths(context, scope="global")
+        if global_paths.env_dir(name).is_dir():
+            _materialize_existing_environment_snapshot(global_paths.env_dir(name), runtime_paths.env_dir(name))
+            return
+    else:
+        global_paths = runtime_paths
+
+    shared_path = _shared_environment_path(runtime_paths, name)
+    if shared_path is None and context.mode == "project":
+        shared_path = _shared_environment_path(global_paths, name)
     if shared_path is None:
         raise EnvironmentError(
             title="Environment Not Found",
@@ -541,7 +577,7 @@ def _local_environment_names(paths: EnvironmentPaths) -> list[str]:
 
 def _materialize_shared_environment(context: InstallContext, name: str, shared_path: Path) -> None:
     manifest = _load_environment_manifest(shared_path)
-    target_dir = environment_paths(context).env_dir(name)
+    target_dir = environment_paths(context, scope=context.mode).env_dir(name)
 
     with TemporaryDirectory(prefix="trivium-env-") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
@@ -673,8 +709,14 @@ def _write_environment_snapshot(
     )
 
 
-def _write_shared_definition(context: InstallContext, *, name: str, lockfile: LockfileData) -> None:
-    paths = environment_paths(context)
+def _write_shared_definition(
+    context: InstallContext,
+    *,
+    name: str,
+    lockfile: LockfileData,
+    scope: EnvironmentScope,
+) -> None:
+    paths = environment_paths(context, scope=scope)
     shared_path = _shared_environment_file(paths, name)
     if shared_path is None:
         raise EnvironmentError(
@@ -693,6 +735,31 @@ def _write_shared_definition(context: InstallContext, *, name: str, lockfile: Lo
             "shared": True,
             "updated_at": utc_now(),
         },
+    )
+
+
+def _materialize_existing_environment_snapshot(source: Path, destination: Path) -> None:
+    _copy_directory(source, destination)
+
+
+def _project_capture_context(context: InstallContext) -> InstallContext:
+    if context.mode == "project":
+        return context
+
+    current = Path.cwd().resolve()
+    project_root = current
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            project_root = candidate
+            break
+
+    install_prefix = Path(".agents") / "skills"
+    return InstallContext(
+        mode="project",
+        base_dir=project_root,
+        skills_dir=project_root / install_prefix,
+        lockfile_path=project_root / LOCKFILE_NAME,
+        install_prefix=install_prefix,
     )
 
 

@@ -349,7 +349,7 @@ def test_add_stops_progress_before_interactive_conflict_prompt(
         def __enter__(self) -> "FakeProgress":
             return self
 
-        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
             return None
 
         def add_task(self, description: str, total: object = None) -> int:
@@ -896,6 +896,83 @@ def test_env_create_captures_current_runtime_and_list_shows_it(tmp_path: Path, m
     assert env_list.exit_code == 0, env_list.output
     assert "office" in env_list.output
     assert "2" in env_list.output
+
+
+def test_env_create_global_captures_current_project_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "pptx": skill_markdown("pptx", "PowerPoint skill"),
+            "pdf": skill_markdown("pdf", "PDF skill"),
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert add_result.exit_code == 0, add_result.output
+
+    create_result = runner.invoke(app, ["env", "create", "office", "--global"])
+
+    assert create_result.exit_code == 0, create_result.output
+    assert "Captured 2 skills." in create_result.output
+    global_env_lockfile = fake_home / ".trivium" / "global" / "envs" / "office" / "skills.lock"
+    assert global_env_lockfile.is_file()
+    assert sorted(load_lockfile(global_env_lockfile).skills) == ["pdf", "pptx"]
+
+
+def test_project_can_activate_globally_stored_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "pptx": skill_markdown("pptx", "PowerPoint skill"),
+            "pdf": skill_markdown("pdf", "PDF skill"),
+        },
+    )
+    source_project = make_project_root(tmp_path / "source-project")
+    target_project = make_project_root(tmp_path / "target-project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    monkeypatch.chdir(source_project)
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert add_result.exit_code == 0, add_result.output
+    create_result = runner.invoke(app, ["env", "create", "office", "--global"])
+    assert create_result.exit_code == 0, create_result.output
+
+    monkeypatch.chdir(target_project)
+    activate_result = runner.invoke(app, ["env", "activate", "office"])
+
+    assert activate_result.exit_code == 0, activate_result.output
+    assert (target_project / ".agents" / "skills" / "pdf" / "SKILL.md").is_file()
+    assert (target_project / ".agents" / "skills" / "pptx" / "SKILL.md").is_file()
+    assert load_lockfile(target_project / "skills.lock").meta["environment"] == "office"
+
+
+def test_env_list_global_shows_globally_stored_environments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"pdf": skill_markdown("pdf", "PDF skill")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    add_result = runner.invoke(app, ["add", str(remote_repo), "--all"])
+    assert add_result.exit_code == 0, add_result.output
+    create_result = runner.invoke(app, ["env", "create", "office", "--global"])
+    assert create_result.exit_code == 0, create_result.output
+
+    list_result = runner.invoke(app, ["env", "list", "--global"])
+
+    assert list_result.exit_code == 0, list_result.output
+    assert "office" in list_result.output
 
 
 def test_env_activate_and_deactivate_swaps_runtime_skill_sets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
