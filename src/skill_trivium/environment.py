@@ -592,13 +592,13 @@ def _materialize_shared_environment(context: InstallContext, name: str, shared_p
         for (source_url, commit_hash), entries in sorted(grouped_entries.items()):
             with cloned_repo_at_revision(source_url, commit_hash) as repo_path:
                 for skill_name, entry in entries:
-                    container = repo_path if entry.skills_path == "." else repo_path / entry.skills_path
+                    container = repo_path if entry.skills_path == "." else repo_path / entry.skills_path  # ty:ignore[unresolved-attribute]
                     skill_dir = container / skill_name
                     if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
                         raise EnvironmentError(
                             title="Environment Materialization Failed",
                             lines=(
-                                f"The shared environment references '{skill_name}' at '{entry.skills_path}/{skill_name}', but it was not found.",
+                                f"The shared environment references '{skill_name}' at '{entry.skills_path}/{skill_name}', but it was not found.",  # ty:ignore[unresolved-attribute]
                                 f"Source: {source_url} @ {commit_hash}",
                             ),
                         )

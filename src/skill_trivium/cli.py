@@ -81,7 +81,7 @@ def main_callback(
 def add(
     ctx: typer.Context,
     url: str = typer.Argument(..., help="Git repository URL containing one or more skills."),
-    all_: bool = typer.Option(False, "--all", "-a", help="Install all valid skills found at the resolved path."),
+    all_: bool = typer.Option(False, "--all", "-a", help="Install all valid skills found at the resolved path. (default if neither --all nor --skills is specified)"),
     skills: str | None = typer.Option(
         None,
         "--skills",
@@ -97,6 +97,12 @@ def add(
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto-resolve conflicts by replacing existing skills."),
     dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Preview changes without writing files."),
+    ignore_validation: bool = typer.Option(
+        False,
+        "--ignore-validation",
+        "-i",
+        help="Ignore skill validation errors and install skills even if they have issues. Must be explicitly set.",
+    ),
     global_: bool = typer.Option(
         False,
         "--global",
@@ -112,8 +118,9 @@ def add(
         path=path,
         yes=yes,
         dry_run=dry_run,
+        ignore_validation=ignore_validation,
         global_=global_,
-        progress_factory=progress_bar,
+        progress_factory=progress_bar,  # ty:ignore[invalid-argument-type]
         is_interactive_terminal=_is_interactive_terminal,
         select_conflict=_select_add_conflict,
     )
@@ -223,7 +230,7 @@ def info(
         details.extend([Rule("metadata"), Pretty(entry.metadata)])
 
     details.extend([Rule("SKILL.md"), Markdown(markdown_body)])
-    console.print(Panel(Group(*details), title=skill_name, border_style="blue"))
+    console.print(Panel(Group(*details), title=skill_name, border_style="blue"))  # ty:ignore[invalid-argument-type]
 
 
 @app.command(no_args_is_help=True)

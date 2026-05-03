@@ -72,6 +72,7 @@ def run_add(
     path: str | None,
     yes: bool,
     dry_run: bool,
+    ignore_validation: bool,
     global_: bool,
     progress_factory: Callable[[], ProgressLike],
     is_interactive_terminal: Callable[[], bool],
@@ -92,6 +93,7 @@ def run_add(
         path (str | None): Optional subdirectory path to search for skills.
         yes (bool): Whether to automatically resolve conflicts by replacing existing skills.
         dry_run (bool): If True, simulates the add operation without making changes.
+        ignore_validation (bool): If True, install skills even if they have validation issues.
         global_ (bool): Whether to install skills globally.
         progress_factory (Callable[[], ProgressLike]): Factory for creating a progress indicator.
         is_interactive_terminal (Callable[[], bool]): Function to check if terminal is interactive.
@@ -132,6 +134,7 @@ def run_add(
                         target_directories,
                         validation_issues=install_outcome.validation_issues,
                         failed=install_outcome.failed,
+                        ignore_validation=ignore_validation,
                     )
                     resolution = _classify_add_candidates(
                         parsed_skills=parsed_skills,
@@ -229,7 +232,8 @@ def _parse_add_skill_names(ctx: typer.Context, all_: bool, skills_value: str | N
     """
     Parse and validate skill name arguments for the add command.
 
-    Ensures that either --all or --skills is used (but not both), and that
+    If neither --all nor --skills is provided, defaults to --all.
+    Ensures that --all and --skills are not both used, and that
     the correct number and type of arguments are provided. Returns a list
     of requested skill names, or None if --all is used. Exits with an error
     and prints a message if arguments are invalid.
@@ -239,8 +243,7 @@ def _parse_add_skill_names(ctx: typer.Context, all_: bool, skills_value: str | N
         console.print(make_panel("err", "Invalid Arguments", ["Use either --all or --skills, not both."]))
         raise typer.Exit(code=2)
     if not all_ and skills_value is None:
-        console.print(make_panel("err", "Invalid Arguments", ["Use either --all or --skills."]))
-        raise typer.Exit(code=2)
+        all_ = True  # Default to --all if neither flag is provided
     if all_ and extra_args:
         console.print(make_panel("err", "Invalid Arguments", ["Skill names may only follow the --skills flag."]))
         raise typer.Exit(code=2)
@@ -339,6 +342,7 @@ def _validate_target_skills(
     *,
     validation_issues: list[ValidationIssue],
     failed: list[str],
+    ignore_validation: bool = False,
 ) -> list[ParsedSkill]:
     """
     Validate target skill directories and parse them into ParsedSkill objects.
@@ -347,20 +351,22 @@ def _validate_target_skills(
         target_directories (list[Path]): List of skill directories to validate.
         validation_issues (list[ValidationIssue]): List to append validation issues for invalid skills.
         failed (list[str]): List to append names of skills that failed validation.
+        ignore_validation (bool): If True, install skills even if they have validation issues.
 
     Returns:
         list[ParsedSkill]: List of successfully parsed skills.
     """
     parsed_skills: list[ParsedSkill] = []
     for skill_dir in target_directories:
-        parsed_skill, issues = validate_skill_directory(skill_dir)
-        if issues:
+        parsed_skill, issues = validate_skill_directory(skill_dir, ignore_validation=ignore_validation)
+        if issues and not ignore_validation:
             validation_issues.extend(issues)
             for issue in issues:
                 print_validation_issue(issue)
             failed.append(skill_dir.name)
             continue
-        parsed_skills.append(parsed_skill)
+        if parsed_skill:
+            parsed_skills.append(parsed_skill)
     return parsed_skills
 
 

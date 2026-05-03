@@ -161,7 +161,9 @@ def build_lock_entry(
     )
 
 
-def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[ValidationIssue]]:
+def validate_skill_directory(
+    skill_dir: Path, *, ignore_validation: bool = False
+) -> tuple[ParsedSkill | None, list[ValidationIssue]]:
     issues: list[ValidationIssue] = []
     skill_name = skill_dir.name
     skill_file = skill_dir / "SKILL.md"
@@ -241,7 +243,7 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
     skill_warnings: list[str] = []
     if isinstance(raw_allowed_tools, list):
         if all(isinstance(item, str) for item in raw_allowed_tools):
-            normalized = " ".join(item.strip() for item in raw_allowed_tools if item.strip())
+            normalized = " ".join(item.strip() for item in raw_allowed_tools if item.strip())  # ty:ignore[unresolved-attribute]
             skill_warnings.append(
                 f"'allowed-tools' was a YAML list and has been converted to a space-separated string: \"{normalized}\""
             )
@@ -308,7 +310,7 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
                     "'metadata' contained non-string primitive values and has been converted to strings."
                 )
 
-    if issues:
+    if issues and not ignore_validation:
         return None, issues
 
     normalized_frontmatter["name"] = str(name).strip()
@@ -325,7 +327,7 @@ def validate_skill_directory(skill_dir: Path) -> tuple[ParsedSkill | None, list[
         ParsedSkill(
             directory=skill_dir,
             name=str(name).strip(),
-            description=str(description).strip(),
+            description=str(description).strip() if isinstance(description, str) else "",
             license=license_value,
             compatibility=compatibility,
             allowed_tools=allowed_tools,

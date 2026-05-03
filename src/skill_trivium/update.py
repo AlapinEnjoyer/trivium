@@ -211,17 +211,24 @@ def _update_source_group(
                     continue
 
                 destination = context.install_path_for(entry.name)
-                if not _entry_needs_refresh(entry, parsed_skill, destination):
+                if parsed_skill and not _entry_needs_refresh(entry, parsed_skill, destination):
+                    
                     if not dry_run:
                         try:
                             if rewrite_normalized_skill_document_if_needed(parsed_skill, destination):
                                 result.rewritten.add(parsed_skill.name)
-                                for warning in parsed_skill.warnings:
-                                    result.warnings.append(UpdateWarning(skill_name=parsed_skill.name, message=warning))
+                                # Use extend with a generator to avoid a manual loop
+                                result.warnings.extend(
+                                    UpdateWarning(skill_name=parsed_skill.name, message=warning)
+                                    for warning in parsed_skill.warnings
+                                )
                         except OSError as error:
                             result.errors.append(f"{entry.name}: {error}")
                             continue
-                    if entry.content_hash is None or entry.commit_hash != commit_hash:
+
+                    needs_lock_update = (entry.content_hash is None or entry.commit_hash != commit_hash)
+                    
+                    if needs_lock_update:
                         result.refreshed[entry.name] = build_lock_entry(
                             parsed_skill=parsed_skill,
                             source_url=entry.source_url,
@@ -230,26 +237,28 @@ def _update_source_group(
                             context=context,
                             installed_at=entry.installed_at,
                         )
+                        
                     continue
 
-                updated_entry = build_lock_entry(
-                    parsed_skill=parsed_skill,
-                    source_url=entry.source_url,
-                    commit_hash=commit_hash,
-                    skills_path=entry.skills_path,
-                    context=context,
-                    installed_at=entry.installed_at,
-                )
-                if not dry_run:
-                    try:
-                        ensure_storage(context)
-                        install_skill_tree(parsed_skill, destination)
-                        for warning in parsed_skill.warnings:
-                            result.warnings.append(UpdateWarning(skill_name=parsed_skill.name, message=warning))
-                    except OSError as error:
-                        result.errors.append(f"{entry.name}: {error}")
-                        continue
-                result.updated[entry.name] = updated_entry
+                if parsed_skill:
+                    updated_entry = build_lock_entry(
+                        parsed_skill=parsed_skill,
+                        source_url=entry.source_url,
+                        commit_hash=commit_hash,
+                        skills_path=entry.skills_path,
+                        context=context,
+                        installed_at=entry.installed_at,
+                    )
+                    if not dry_run:
+                        try:
+                            ensure_storage(context)
+                            install_skill_tree(parsed_skill, destination)
+                            for warning in parsed_skill.warnings:
+                                result.warnings.append(UpdateWarning(skill_name=parsed_skill.name, message=warning))
+                        except OSError as error:
+                            result.errors.append(f"{entry.name}: {error}")
+                            continue
+                    result.updated[entry.name] = updated_entry
     except GitCloneError as error:
         result.auth_failure = error.auth_failure
         message = error.stderr

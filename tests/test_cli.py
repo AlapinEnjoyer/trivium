@@ -175,6 +175,66 @@ def test_add_skips_invalid_skill_but_installs_valid_ones(
     assert "Validation Failed: bad-skill" in result.output
 
 
+def test_add_ignore_validation_installs_invalid_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "good-skill": skill_markdown("good-skill", "Good skill"),
+            "bad-skill": "---\nname: bad-skill\n---\n",
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--all", "--ignore-validation"])
+
+    assert result.exit_code == 0, result.output
+    assert "Add Summary" in result.output
+    assert (project_root / ".agents" / "skills" / "good-skill" / "SKILL.md").is_file()
+    assert (project_root / ".agents" / "skills" / "bad-skill" / "SKILL.md").is_file()
+
+
+def test_add_ignore_validation_with_specific_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "valid-skill": skill_markdown("valid-skill", "Valid skill"),
+            "invalid-skill": "---\nname: invalid-skill\n---\n",
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--skills", "invalid-skill", "--ignore-validation"])
+
+    assert result.exit_code == 0, result.output
+    assert (project_root / ".agents" / "skills" / "invalid-skill" / "SKILL.md").is_file()
+    assert not (project_root / ".agents" / "skills" / "valid-skill").exists()
+
+
+def test_add_ignore_validation_no_exit_code_two(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"bad-skill": "---\nname: bad-skill\n---\n"},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--all", "--ignore-validation"])
+
+    assert result.exit_code == 0, result.output
+    assert "Validation Failed" not in result.output
+
+
 def test_add_normalizes_yaml_list_allowed_tools_in_installed_skill(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

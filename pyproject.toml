@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "skill-trivium"
-version = "0.2.2"
+version = "0.2.3"
 description = "A minimal CLI for managing AI agent skills"
 readme = "README.md"
 authors = [
@@ -29,7 +29,7 @@ trv = "skill_trivium.cli:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.4.2,<9.0.0",
+    "pytest>=9.0.1,<10.0.0",
     "twine>=6.2.0,<7.0.0",
 ]
 
