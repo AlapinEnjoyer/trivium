@@ -81,7 +81,12 @@ def main_callback(
 def add(
     ctx: typer.Context,
     url: str = typer.Argument(..., help="Git repository URL containing one or more skills."),
-    all_: bool = typer.Option(False, "--all", "-a", help="Install all valid skills found at the resolved path. (default if neither --all nor --skills is specified)"),
+    all_: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Install all valid skills found at the resolved path. (default if neither --all nor --skills is specified)",
+    ),
     skills: str | None = typer.Option(
         None,
         "--skills",

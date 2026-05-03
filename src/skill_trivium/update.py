@@ -212,7 +212,6 @@ def _update_source_group(
 
                 destination = context.install_path_for(entry.name)
                 if parsed_skill and not _entry_needs_refresh(entry, parsed_skill, destination):
-                    
                     if not dry_run:
                         try:
                             if rewrite_normalized_skill_document_if_needed(parsed_skill, destination):
@@ -226,8 +225,8 @@ def _update_source_group(
                             result.errors.append(f"{entry.name}: {error}")
                             continue
 
-                    needs_lock_update = (entry.content_hash is None or entry.commit_hash != commit_hash)
-                    
+                    needs_lock_update = entry.content_hash is None or entry.commit_hash != commit_hash
+
                     if needs_lock_update:
                         result.refreshed[entry.name] = build_lock_entry(
                             parsed_skill=parsed_skill,
@@ -237,7 +236,7 @@ def _update_source_group(
                             context=context,
                             installed_at=entry.installed_at,
                         )
-                        
+
                     continue
 
                 if parsed_skill:
