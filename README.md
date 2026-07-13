@@ -91,6 +91,14 @@ trv add <url> -a -p skills/
 trv add <url> -a --dry-run
 trv add <url> -a -n
 
+# Install despite Agent Skills Specification validation issues
+trv add <url> -a --ignore-validation
+trv add <url> -a -i
+
+# Replace lockfile-tracked skills from a different source without prompting
+trv add <url> -a --yes
+trv add <url> -a -y
+
 # Install to ~/.agents/
 trv add <url> -a --global
 trv add <url> -a -g
@@ -99,6 +107,8 @@ trv add <url> -a -g
 **Note:** Options can be placed before or after the URL. All these are valid:
 - `trv add https://example.com/repo.git --all`
 - `trv add --all https://example.com/repo.git`
+
+`--ignore-validation` bypasses Agent Skills Specification validation errors, such as a missing description or unsupported optional field value. It does not bypass structural and filesystem safety requirements: the repository must contain a parseable `SKILL.md`, installation names must be safe relative directory names, selected skills may not resolve to the same installation name, and an existing untracked destination is never overwritten. Compatibility normalization for `metadata` and `allowed-tools` still applies.
 
 ### `update` - Update installed skills
 
@@ -114,12 +124,14 @@ trv update -g              # Update global skills (--global)
 ```bash
 trv list          # Show skills table
 trv list --json   # Output as JSON
+trv list --global # Show global skills
 ```
 
 ### `info` - Show skill details
 
 ```bash
 trv info skill-name
+trv info skill-name --global
 ```
 
 ### `remove` - Remove skills
@@ -128,6 +140,7 @@ trv info skill-name
 trv remove skill1 skill2   # Remove specific skills
 trv remove -a              # Remove all skills (--all)
 trv remove -a -y           # Skip confirmation (--yes)
+trv remove skill1 --global # Remove a global skill
 ```
 
 ### `init` - Create a new skill
@@ -135,12 +148,14 @@ trv remove -a -y           # Skip confirmation (--yes)
 ```bash
 trv init my-skill           # Minimal scaffold
 trv init my-skill --full    # Include scripts/, references/, assets/
+trv init my-skill --global  # Scaffold in ~/.agents/skills/
 ```
 
 ### `env` - Manage named environments
 
 ```bash
 trv env list
+trv env list --global
 trv env create office
 trv env create office --global
 trv env create office --shared
@@ -148,8 +163,11 @@ trv env create scratch --empty
 trv env activate office
 trv env activate office --global
 trv env info
+trv env info office --global
 trv env deactivate
+trv env deactivate --global
 trv env remove office
+trv env remove office --global
 ```
 
 ## Project vs Global Mode
@@ -162,6 +180,7 @@ trv env remove office
 
 **Global mode** (with `--global`):
 - Skills install to `~/.agents/skills/`
+- Metadata is stored in `~/.agents/skills.lock`
 - Available across all projects
 
 ## What is `skills.lock`?
@@ -174,19 +193,28 @@ trv env remove office
 
 This enables `trv update` to fetch newer versions from the original sources.
 
+Trivium keeps one lockfile per project and one global lockfile. Environment lockfiles under `.agents/environments/` or `~/.trivium/` are separate snapshots, not additional global manifests. Lockfile format versions and project/global modes are validated before use. Writes are atomic, and mutating `add` commands are serialized so concurrent global additions do not overwrite each other's entries.
+
+If a skill directory exists but is not recorded in the corresponding lockfile, `trv add` refuses to replace it. Move or remove that directory explicitly before retrying.
+
 ## Environments
 
 Named environments are optional. If you do not use `trv env`, `trv` keeps the current behavior and works directly with the active runtime in `.agents/skills/` and `skills.lock`.
 
 - `trv env create <name>` captures the current runtime by default
-- `trv env create <name> --global` stores the environment in `~/.trivium/` so it can be activated from any project later
+- `trv env create <name> --global` captures the current project's runtime and stores the snapshot under `~/.trivium/global/envs/<name>/`
+- global environment names share one account-wide namespace; they are not owned by the project that created them
+- multiple global environments can coexist when they have different names; creating an existing name fails instead of overwriting it
+- remove an existing global environment with `trv env remove <name> --global` before recreating that name
 - `--empty` creates an empty environment
 - `--shared` also writes a shareable definition to `.agents/environments/<name>.lock`
+- `--shared` is project-only and cannot be combined with `--global`
 - `trv env activate <name>` swaps the active runtime to that environment
 - project activation also falls back to globally stored environments when no project-scoped env with that name exists
-- `trv env activate <name> --global` activates that environment into `~/.agents/skills/`
+- activating a global environment from a project creates a project-local copy; later project changes do not overwrite the stored global snapshot
+- `trv env activate <name> --global` activates that environment directly into `~/.agents/skills/`
 - if only `.agents/environments/<name>.lock` exists, `trv env activate <name>` materializes a local snapshot from that shared definition first
 - `trv env deactivate` restores the previous non-environment runtime
 - `trv env remove <name>` removes the local snapshot and shared definition, and auto-deactivates it first if needed
 
-Local environment snapshots are stored under `~/.trivium/`. Shared environment definitions are only available in project mode.
+Project-local environment snapshots are stored under a project-specific hashed directory in `~/.trivium/projects/`. Global snapshots are stored under `~/.trivium/global/envs/`. Shared environment definitions are only available in project mode.

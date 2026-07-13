@@ -64,7 +64,7 @@ def parse_skill_document(skill_file: Path) -> tuple[dict[str, object], str]:
         raise ValueError("SKILL.md frontmatter is missing a closing '---' delimiter.")
 
     frontmatter_text = "".join(lines[1:closing_index])
-    body = "".join(lines[closing_index + 1 :]).lstrip("\n")
+    body = "".join(lines[closing_index + 1 :]).lstrip("\r\n")
 
     try:
         loaded = yaml.safe_load(frontmatter_text) or {}
@@ -80,7 +80,7 @@ def parse_skill_document(skill_file: Path) -> tuple[dict[str, object], str]:
 
 def render_skill_document(frontmatter: dict[str, object], body: str) -> str:
     frontmatter_text = yaml.dump(frontmatter, sort_keys=False, allow_unicode=False, default_flow_style=False)
-    normalized_body = body.lstrip("\n")
+    normalized_body = body.lstrip("\r\n")
     return f"---\n{frontmatter_text}---\n\n{normalized_body}" if normalized_body else f"---\n{frontmatter_text}---\n"
 
 

@@ -14,9 +14,11 @@ class InstallContext:
     install_prefix: Path
 
     def install_path_for(self, skill_name: str) -> Path:
+        _validate_install_name(skill_name)
         return self.skills_dir / skill_name
 
     def relative_install_path(self, skill_name: str) -> str:
+        _validate_install_name(skill_name)
         return (self.install_prefix / skill_name).as_posix()
 
 
@@ -137,3 +139,9 @@ def _optional_string(value: object) -> str | None:
         stripped = value.strip()
         return stripped or None
     return None
+
+
+def _validate_install_name(skill_name: str) -> None:
+    path = Path(skill_name)
+    if not skill_name or path.is_absolute() or len(path.parts) != 1 or skill_name in {".", ".."}:
+        raise ValueError("Skill names must be a single relative path component.")

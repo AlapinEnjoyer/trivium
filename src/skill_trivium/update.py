@@ -155,12 +155,11 @@ def _apply_update_result(
         console.print(make_panel("err", "Update Failed", [error]))
 
     outcome.auth_failure = outcome.auth_failure or result.auth_failure
+    outcome.runtime_changed = outcome.runtime_changed or bool(result.rewritten)
 
     for skill_name, refreshed_entry in sorted(result.refreshed.items()):
         lockfile.skills[skill_name] = refreshed_entry
         outcome.lockfile_changed = True
-        if skill_name in result.rewritten:
-            outcome.runtime_changed = True
 
     if dry_run:
         outcome.updated_names.extend(sorted(result.updated))

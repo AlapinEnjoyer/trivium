@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -49,17 +50,28 @@ def clone_repository(source_url: str, destination: Path, *, shallow: bool = True
     if shallow:
         command.extend(["--depth", "1", "--single-branch"])
     command.extend([source_url, str(destination)])
-    result = subprocess.run(
+    stderr_chunks: list[str] = []
+    show_stderr = sys.stdin.isatty() and sys.stderr.isatty()
+    with subprocess.Popen(
         command,
-        capture_output=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
-    )
-    if result.returncode == 0:
+    ) as process:
+        assert process.stderr is not None
+        while chunk := process.stderr.read(1):
+            stderr_chunks.append(chunk)
+            if show_stderr:
+                sys.stderr.write(chunk)
+                sys.stderr.flush()
+        returncode = process.wait()
+
+    if returncode == 0:
         return
 
-    stderr = sanitize_git_error(result.stderr)
-    auth_failure, guidance = classify_auth_failure(source_url, stderr)
+    raw_stderr = "".join(stderr_chunks)
+    stderr = sanitize_git_error(raw_stderr)
+    auth_failure, guidance = classify_auth_failure(source_url, raw_stderr)
     raise GitCloneError(source_url=source_url, stderr=stderr, auth_failure=auth_failure, guidance=guidance)
 
 

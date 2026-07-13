@@ -9,7 +9,7 @@ from typing import Literal
 import tomli_w
 
 from skill_trivium.git import GitCheckoutError, GitCloneError, cloned_repo_at_revision
-from skill_trivium.lockfile import LOCKFILE_VERSION, load_lockfile, write_lockfile_path
+from skill_trivium.lockfile import LOCKFILE_VERSION, load_lockfile, write_lockfile, write_lockfile_path
 from skill_trivium.models import InstallContext, LockfileData
 from skill_trivium.skills import (
     MAX_NAME_LENGTH,
@@ -177,6 +177,12 @@ def create_environment(
     _validate_or_raise(name)
     env_scope = scope or context.mode
     paths = environment_paths(context, scope=env_scope)
+    if shared and paths.shared_envs_dir is None:
+        raise EnvironmentError(
+            title="Shared Environments Unsupported",
+            lines=("Shared environments are only available in project mode.",),
+            exit_code=2,
+        )
     local_dir = paths.env_dir(name)
     shared_path = _shared_environment_file(paths, name)
     local_exists = local_dir.is_dir()
@@ -418,7 +424,7 @@ class RuntimeSnapshot:
 
 def load_runtime_snapshot(context: InstallContext, *, require_content_hashes: bool) -> RuntimeSnapshot:
     lockfile_present = context.lockfile_path.exists()
-    lockfile = load_lockfile(context.lockfile_path)
+    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     skills_dir = context.skills_dir
     managed_names = set(lockfile.skills)
     if skills_dir.exists():
@@ -645,8 +651,7 @@ def _restore_snapshot(snapshot_dir: Path, context: InstallContext) -> None:
 
     snapshot_lockfile = snapshot_dir / LOCKFILE_NAME
     if snapshot_lockfile.is_file():
-        context.lockfile_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(snapshot_lockfile, context.lockfile_path)
+        write_lockfile(context, load_lockfile(snapshot_lockfile))
     elif context.lockfile_path.exists():
         context.lockfile_path.unlink()
 

@@ -13,7 +13,7 @@ from skill_trivium.environment import (
     sync_active_environment,
 )
 from skill_trivium.git import GitCloneError, cloned_repo
-from skill_trivium.lockfile import load_lockfile, write_lockfile
+from skill_trivium.lockfile import installation_lock, load_lockfile, write_lockfile
 from skill_trivium.models import InstallContext, LockfileData, ParsedSkill, SkillLockEntry, ValidationIssue
 from skill_trivium.skills import (
     build_lock_entry,
@@ -61,6 +61,8 @@ class AddOutcome:
 class AddResolution:
     pending_installs: list[ParsedSkill] = field(default_factory=list)
     conflicts: list[tuple[ParsedSkill, SkillLockEntry]] = field(default_factory=list)
+    untracked: list[ParsedSkill] = field(default_factory=list)
+    rejected: dict[str, str] = field(default_factory=dict)
 
 
 def run_add(
@@ -74,6 +76,56 @@ def run_add(
     dry_run: bool,
     ignore_validation: bool,
     global_: bool,
+    progress_factory: Callable[[], ProgressLike],
+    is_interactive_terminal: Callable[[], bool],
+    select_conflict: Callable[[str], str | None],
+) -> None:
+    context = resolve_install_context(global_)
+    if dry_run:
+        _run_add(
+            ctx=ctx,
+            url=url,
+            all_=all_,
+            skills=skills,
+            path=path,
+            yes=yes,
+            dry_run=dry_run,
+            ignore_validation=ignore_validation,
+            context=context,
+            progress_factory=progress_factory,
+            is_interactive_terminal=is_interactive_terminal,
+            select_conflict=select_conflict,
+        )
+        return
+
+    with installation_lock(context):
+        _run_add(
+            ctx=ctx,
+            url=url,
+            all_=all_,
+            skills=skills,
+            path=path,
+            yes=yes,
+            dry_run=dry_run,
+            ignore_validation=ignore_validation,
+            context=context,
+            progress_factory=progress_factory,
+            is_interactive_terminal=is_interactive_terminal,
+            select_conflict=select_conflict,
+        )
+
+
+def _run_add(
+    *,
+    ctx: typer.Context,
+    url: str,
+    all_: bool,
+    skills: str | None,
+    path: str | None,
+    yes: bool,
+    dry_run: bool,
+    ignore_validation: bool,
+    context: InstallContext,
     progress_factory: Callable[[], ProgressLike],
     is_interactive_terminal: Callable[[], bool],
     select_conflict: Callable[[str], str | None],
@@ -106,14 +158,13 @@ def run_add(
         typer.Exit: If an error occurs or user input is invalid.
     """
     requested_names = _parse_add_skill_names(ctx, all_, skills)
-    context = resolve_install_context(global_)
     try:
         ensure_active_environment_runtime_is_clean(context)
     except EnvironmentError as error:
         console.print(make_panel(error.kind, error.title, list(error.lines)))
         raise typer.Exit(code=error.exit_code) from error
 
-    lockfile = load_lockfile(context.lockfile_path)
+    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
 
     install_outcome = AddOutcome()
 
@@ -121,6 +172,8 @@ def run_add(
         with progress_factory() as progress:
             task = progress.add_task("Cloning repository", total=None)
             try:
+                # Git may need the terminal for HTTPS credentials or an SSH passphrase.
+                progress.stop()
                 with cloned_repo(url) as (repo_path, commit_hash):
                     progress.update(task, completed=1)
                     skills_container, skills_path = _resolve_skills_container(repo_path, path)
@@ -145,6 +198,25 @@ def run_add(
                         repaired=install_outcome.repaired,
                         skipped=install_outcome.skipped,
                     )
+
+                    if resolution.rejected:
+                        for skill_name, reason in resolution.rejected.items():
+                            console.print(make_panel("err", f"Rejected Skill: {skill_name}", [reason]))
+                        raise typer.Exit(code=2)
+
+                    if resolution.untracked:
+                        for parsed_skill in resolution.untracked:
+                            console.print(
+                                make_panel(
+                                    "err",
+                                    f"Untracked Skill: {parsed_skill.name}",
+                                    [
+                                        f"The destination '{context.install_path_for(parsed_skill.name)}' already exists",
+                                        "but is not recorded in the lockfile. Move or remove it before adding this skill.",
+                                    ],
+                                )
+                            )
+                        raise typer.Exit(code=4)
 
                     # Stop the live display before printing conflict panels or
                     # prompting so Rich and Questionary do not compete for the terminal.
@@ -397,10 +469,28 @@ def _classify_add_candidates(
     """
 
     resolution = AddResolution()
+    candidate_names: set[str] = set()
     for parsed_skill in parsed_skills:
+        try:
+            destination = context.install_path_for(parsed_skill.name)
+        except ValueError:
+            resolution.rejected[parsed_skill.directory.name] = (
+                f"The skill name '{parsed_skill.name}' is not safe to use as an installation directory."
+            )
+            continue
+        if parsed_skill.name in candidate_names:
+            resolution.rejected[parsed_skill.directory.name] = (
+                f"Multiple selected skills resolve to the installation name '{parsed_skill.name}'."
+            )
+            continue
+        candidate_names.add(parsed_skill.name)
+
         existing = lockfile.skills.get(parsed_skill.name)
         if existing is None:
-            resolution.pending_installs.append(parsed_skill)
+            if destination.exists():
+                resolution.untracked.append(parsed_skill)
+            else:
+                resolution.pending_installs.append(parsed_skill)
             continue
         if existing.source_url == source_url:
             if not dry_run and rewrite_normalized_skill_document_if_needed(

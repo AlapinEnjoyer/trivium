@@ -154,7 +154,7 @@ def update(
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
 
-    lockfile = load_lockfile(context.lockfile_path)
+    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     if not lockfile.skills:
         console.print(make_panel("info", "No Skills Installed", ["Nothing to update."]))
         raise typer.Exit()
@@ -200,7 +200,7 @@ def info(
     global_: bool = typer.Option(False, "--global", "-g", help="Look up the skill in the global install."),
 ) -> None:
     context = resolve_install_context(global_)
-    lockfile = load_lockfile(context.lockfile_path)
+    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     entry = lockfile.skills.get(skill_name)
     if entry is None:
         print_validation_issue(
@@ -265,7 +265,7 @@ def remove(
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
 
-    lockfile = load_lockfile(context.lockfile_path)
+    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     if not lockfile.skills:
         console.print(make_panel("info", "No Skills Installed", ["Nothing to remove."]))
         raise typer.Exit()
@@ -345,7 +345,7 @@ def init(
         raise typer.Exit(code=1)
 
     ensure_storage(context)
-    lockfile = load_lockfile(context.lockfile_path)
+    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "SKILL.md").write_text(build_skill_markdown(skill_name), encoding="utf-8")
     if full:
@@ -543,7 +543,7 @@ def info_env(
 
 def _render_skill_list(*, json_: bool, global_: bool) -> None:
     context = resolve_install_context(global_)
-    lockfile = load_lockfile(context.lockfile_path)
+    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     if json_:
         console.out(json.dumps(lockfile.to_dict(), indent=2, sort_keys=True))
         return

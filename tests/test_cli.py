@@ -235,6 +235,48 @@ def test_add_ignore_validation_no_exit_code_two(
     assert "Validation Failed" not in result.output
 
 
+def test_add_ignore_validation_rejects_unsafe_install_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"unsafe-skill": "---\nname: ../escape\ndescription: Unsafe\n---\n"},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--all", "--ignore-validation"])
+
+    assert result.exit_code == 2
+    assert "Rejected Skill: unsafe-skill" in result.output
+    assert "not safe" in result.output
+    assert not (project_root / ".agents" / "escape").exists()
+    assert not (project_root / "skills.lock").exists()
+
+
+def test_add_ignore_validation_rejects_duplicate_install_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {
+            "first-skill": skill_markdown("shared-name", "First"),
+            "second-skill": skill_markdown("shared-name", "Second"),
+        },
+    )
+    project_root = make_project_root(tmp_path / "project")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--all", "--ignore-validation"])
+
+    assert result.exit_code == 2
+    assert "Rejected Skill: second-skill" in result.output
+    assert "Multiple selected skills" in result.output
+    assert not (project_root / ".agents" / "skills" / "shared-name").exists()
+
+
 def test_add_normalizes_yaml_list_allowed_tools_in_installed_skill(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -894,6 +936,58 @@ def test_global_mode_uses_home_agents_directory(tmp_path: Path, monkeypatch: pyt
     assert lockfile.skills["global-skill"].install_path == "skills/global-skill"
 
 
+def test_global_mode_merges_sequential_adds_from_multiple_repositories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_repo = create_git_skill_repo(
+        tmp_path / "first-remote",
+        {"alpha-skill": skill_markdown("alpha-skill", "Alpha description")},
+    )
+    second_repo = create_git_skill_repo(
+        tmp_path / "second-remote",
+        {"beta-skill": skill_markdown("beta-skill", "Beta description")},
+    )
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(tmp_path)
+
+    first_result = runner.invoke(app, ["add", str(first_repo), "--all", "--global"])
+    second_result = runner.invoke(app, ["add", str(second_repo), "--all", "--global"])
+
+    assert first_result.exit_code == 0, first_result.output
+    assert second_result.exit_code == 0, second_result.output
+    lockfile = load_lockfile(fake_home / ".agents" / "skills.lock", expected_mode="global")
+    assert sorted(lockfile.skills) == ["alpha-skill", "beta-skill"]
+    assert (fake_home / ".agents" / "skills" / "alpha-skill" / "SKILL.md").is_file()
+    assert (fake_home / ".agents" / "skills" / "beta-skill" / "SKILL.md").is_file()
+
+
+def test_global_add_refuses_to_replace_untracked_skill_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"manual-skill": skill_markdown("manual-skill", "Remote description")},
+    )
+    fake_home = tmp_path / "home"
+    manual_dir = fake_home / ".agents" / "skills" / "manual-skill"
+    manual_dir.mkdir(parents=True)
+    marker = manual_dir / "local-work.txt"
+    marker.write_text("preserve me", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["add", str(remote_repo), "--all", "--global"])
+
+    assert result.exit_code == 4
+    assert "Untracked Skill: manual-skill" in result.output
+    assert marker.read_text(encoding="utf-8") == "preserve me"
+    assert not (fake_home / ".agents" / "skills.lock").exists()
+
+
 def test_local_mode_outside_git_repo_uses_current_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
@@ -982,6 +1076,75 @@ def test_env_create_global_captures_current_project_runtime(tmp_path: Path, monk
     global_env_lockfile = fake_home / ".trivium" / "global" / "envs" / "office" / "skills.lock"
     assert global_env_lockfile.is_file()
     assert sorted(load_lockfile(global_env_lockfile).skills) == ["pdf", "pptx"]
+
+
+def test_env_create_multiple_global_environments_and_reject_duplicate_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"alpha-skill": skill_markdown("alpha-skill", "Alpha skill")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+    assert runner.invoke(app, ["add", str(remote_repo), "--all"]).exit_code == 0
+
+    first_result = runner.invoke(app, ["env", "create", "office", "--global"])
+    second_result = runner.invoke(app, ["env", "create", "engineering", "--global"])
+    duplicate_result = runner.invoke(app, ["env", "create", "office", "--global"])
+
+    assert first_result.exit_code == 0, first_result.output
+    assert second_result.exit_code == 0, second_result.output
+    assert duplicate_result.exit_code == 1
+    assert "Environment Exists" in duplicate_result.output
+    global_envs = fake_home / ".trivium" / "global" / "envs"
+    assert sorted(path.name for path in global_envs.iterdir()) == ["engineering", "office"]
+
+
+def test_project_captured_global_environment_activates_into_global_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"alpha-skill": skill_markdown("alpha-skill", "Alpha skill")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+    assert runner.invoke(app, ["add", str(remote_repo), "--all"]).exit_code == 0
+    assert runner.invoke(app, ["env", "create", "office", "--global"]).exit_code == 0
+
+    activate_result = runner.invoke(app, ["env", "activate", "office", "--global"])
+
+    assert activate_result.exit_code == 0, activate_result.output
+    assert (fake_home / ".agents" / "skills" / "alpha-skill" / "SKILL.md").is_file()
+    global_lockfile = load_lockfile(fake_home / ".agents" / "skills.lock", expected_mode="global")
+    assert global_lockfile.meta["environment"] == "office"
+    assert sorted(global_lockfile.skills) == ["alpha-skill"]
+
+
+def test_env_create_global_shared_is_rejected_without_partial_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["env", "create", "office", "--global", "--shared"])
+
+    assert result.exit_code == 2
+    assert "Shared Environments Unsupported" in result.output
+    assert not (fake_home / ".trivium" / "global" / "envs" / "office").exists()
 
 
 def test_project_can_activate_globally_stored_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
