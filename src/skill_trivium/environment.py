@@ -483,6 +483,22 @@ def load_runtime_snapshot(context: InstallContext, *, require_content_hashes: bo
     lockfile_present = context.lockfile_path.exists()
     lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     skills_dir = context.skills_dir
+    _validate_skill_tree(
+        lockfile,
+        skills_dir,
+        lockfile_name=context.lockfile_path.name,
+        require_content_hashes=require_content_hashes,
+    )
+    return RuntimeSnapshot(lockfile=lockfile, skills_dir=skills_dir, lockfile_present=lockfile_present)
+
+
+def _validate_skill_tree(
+    lockfile: LockfileData,
+    skills_dir: Path,
+    *,
+    lockfile_name: str,
+    require_content_hashes: bool,
+) -> None:
     managed_names = set(lockfile.skills)
     if skills_dir.exists():
         unmanaged = sorted(
@@ -493,20 +509,20 @@ def load_runtime_snapshot(context: InstallContext, *, require_content_hashes: bo
             raise EnvironmentError(
                 title="Unmanaged Skills Detected",
                 lines=(
-                    f"The runtime contains skill directories that are not tracked in {context.lockfile_path.name}: {formatted}.",
-                    "Only lockfile-managed skills can be captured into an environment.",
+                    f"The skill tree contains directories that are not tracked in {lockfile_name}: {formatted}.",
+                    "Only lockfile-managed skills can be used in an environment.",
                 ),
                 exit_code=2,
             )
 
-    missing = sorted(name for name in managed_names if not context.install_path_for(name).is_dir())
+    missing = sorted(name for name in managed_names if not (skills_dir / name).is_dir())
     if missing:
         formatted = ", ".join(missing)
         raise EnvironmentError(
             title="Missing Installed Skills",
             lines=(
-                f"The lockfile references skills that are missing on disk: {formatted}.",
-                "Run `trv update` or remove the broken skills before using environments.",
+                f"The lockfile references skills that are missing from the skill tree: {formatted}.",
+                "Recreate or repair the runtime or environment before switching environments.",
             ),
             exit_code=2,
         )
@@ -518,8 +534,8 @@ def load_runtime_snapshot(context: InstallContext, *, require_content_hashes: bo
             raise EnvironmentError(
                 title="Lockfile Missing Content Hashes",
                 lines=(
-                    f"The runtime lockfile does not have content hashes for: {formatted}.",
-                    "Run `trv update` first so trivium can verify the runtime before capturing an environment.",
+                    f"The lockfile does not have content hashes for: {formatted}.",
+                    "Run `trv update` or recreate the environment so trivium can verify its contents.",
                 ),
                 exit_code=2,
             )
@@ -528,20 +544,18 @@ def load_runtime_snapshot(context: InstallContext, *, require_content_hashes: bo
     for name, entry in sorted(lockfile.skills.items()):
         if entry.content_hash is None:
             continue
-        if hash_skill_directory(context.install_path_for(name)) != entry.content_hash:
+        if hash_skill_directory(skills_dir / name) != entry.content_hash:
             dirty.append(name)
     if dirty:
         formatted = ", ".join(dirty)
         raise EnvironmentError(
             title="Runtime Has Local Modifications",
             lines=(
-                f"The installed skills differ from the recorded lockfile hashes: {formatted}.",
-                "Update or reinstall those skills before capturing or switching environments.",
+                f"The skill tree differs from the recorded lockfile hashes: {formatted}.",
+                "Update, reinstall, or recreate those skills before switching environments.",
             ),
             exit_code=2,
         )
-
-    return RuntimeSnapshot(lockfile=lockfile, skills_dir=skills_dir, lockfile_present=lockfile_present)
 
 
 def environment_paths(context: InstallContext, *, scope: EnvironmentScope) -> EnvironmentPaths:
@@ -707,6 +721,12 @@ def _restore_snapshot(snapshot_dir: Path, context: InstallContext) -> None:
     snapshot_lockfile = snapshot_dir / LOCKFILE_NAME
     lockfile = load_lockfile(snapshot_lockfile) if snapshot_lockfile.is_file() else None
     snapshot_skills_dir = snapshot_dir / "skills"
+    _validate_skill_tree(
+        lockfile or LockfileData(),
+        snapshot_skills_dir,
+        lockfile_name=snapshot_lockfile.name,
+        require_content_hashes=True,
+    )
     context.skills_dir.parent.mkdir(parents=True, exist_ok=True)
 
     with TemporaryDirectory(prefix=".trivium-restore-", dir=context.skills_dir.parent) as temp_dir_name:

@@ -26,6 +26,7 @@ from skill_trivium.environment import (
 )
 from skill_trivium.lockfile import LockfileError, write_lockfile
 from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry
+from skill_trivium.skills import hash_skill_directory
 
 
 def make_context(tmp_path: Path) -> InstallContext:
@@ -271,6 +272,55 @@ def test_restore_snapshot_validates_lockfile_before_replacing_runtime(tmp_path: 
     assert installed_document.read_text(encoding="utf-8") == "original runtime"
 
 
+def test_restore_snapshot_rejects_hash_mismatch_before_replacing_runtime(tmp_path: Path) -> None:
+    """Keep the current runtime when snapshot content does not match its hash."""
+    context = make_context(tmp_path)
+    installed_skill = context.install_path_for("alpha")
+    installed_skill.mkdir(parents=True)
+    installed_document = installed_skill / "SKILL.md"
+    installed_document.write_text("original runtime", encoding="utf-8")
+
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_skill = snapshot_dir / "skills" / "alpha"
+    snapshot_skill.mkdir(parents=True)
+    (snapshot_skill / "SKILL.md").write_text("corrupted snapshot", encoding="utf-8")
+    write_lockfile(
+        InstallContext(
+            mode="project",
+            base_dir=snapshot_dir,
+            skills_dir=snapshot_dir / "skills",
+            lockfile_path=snapshot_dir / "skills.lock",
+            install_prefix=Path("skills"),
+        ),
+        LockfileData(skills={"alpha": make_entry(content_hash="incorrect-hash")}),
+    )
+
+    with pytest.raises(EnvironmentError) as exc_info:
+        environment_module._restore_snapshot(snapshot_dir, context)
+
+    assert exc_info.value.title == "Runtime Has Local Modifications"
+    assert installed_document.read_text(encoding="utf-8") == "original runtime"
+
+
+def test_restore_snapshot_rejects_unmanaged_skill_before_replacing_runtime(tmp_path: Path) -> None:
+    """Keep the current runtime when a snapshot has no matching lock entry."""
+    context = make_context(tmp_path)
+    installed_skill = context.install_path_for("alpha")
+    installed_skill.mkdir(parents=True)
+    installed_document = installed_skill / "SKILL.md"
+    installed_document.write_text("original runtime", encoding="utf-8")
+
+    unmanaged_skill = tmp_path / "snapshot" / "skills" / "rogue"
+    unmanaged_skill.mkdir(parents=True)
+    (unmanaged_skill / "SKILL.md").write_text("unmanaged snapshot", encoding="utf-8")
+
+    with pytest.raises(EnvironmentError) as exc_info:
+        environment_module._restore_snapshot(tmp_path / "snapshot", context)
+
+    assert exc_info.value.title == "Unmanaged Skills Detected"
+    assert installed_document.read_text(encoding="utf-8") == "original runtime"
+
+
 def test_restore_snapshot_rolls_back_runtime_when_lockfile_write_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -294,7 +344,7 @@ def test_restore_snapshot_rolls_back_runtime_when_lockfile_write_fails(
             lockfile_path=snapshot_dir / "skills.lock",
             install_prefix=Path("skills"),
         ),
-        LockfileData(),
+        LockfileData(skills={"alpha": make_entry(content_hash=hash_skill_directory(snapshot_skill))}),
     )
 
     def failed_write(_context: InstallContext, _lockfile: LockfileData) -> None:
