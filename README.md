@@ -195,7 +195,7 @@ trv env remove office --global
 
 This enables `trv update` to fetch newer versions from the original sources.
 
-Trivium keeps one lockfile per project and one global lockfile. Environment lockfiles under `.agents/environments/` or `~/.trivium/` are separate snapshots, not additional global manifests. Lockfile format versions and project/global modes are validated before use. Writes are atomic, and mutating `add` commands are serialized so concurrent global additions do not overwrite each other's entries.
+Trivium keeps one lockfile per project and one global lockfile. Environment lockfiles under `.agents/environments/` or `~/.trivium/` are separate snapshots, not additional global manifests. Lockfile format versions and project/global modes are validated before use. Runtime and environment mutations are serialized, metadata writes are atomic, and staged filesystem changes preserve the previous state when a commit fails.
 
 If a skill directory exists but is not recorded in the corresponding lockfile, `trv add` refuses to replace it. Move or remove that directory explicitly before retrying.
 
