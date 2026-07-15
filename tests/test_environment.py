@@ -16,8 +16,10 @@ from skill_trivium.environment import (
     EnvironmentState,
     activate_environment,
     deactivate_environment,
+    environment_paths,
     load_environment_state,
     load_runtime_snapshot,
+    remove_environment,
     sync_active_environment,
     write_environment_state,
 )
@@ -143,6 +145,30 @@ def test_deactivate_environment_reloads_state_after_acquiring_lock(
 
     assert not was_active
     assert load_environment_state(context).active is None
+
+
+def test_remove_environment_reloads_snapshot_state_after_acquiring_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject removal when the environment disappears while waiting for the lock."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path)
+    environment_dir = environment_paths(context, scope="project").env_dir("office")
+    environment_dir.mkdir(parents=True)
+
+    @contextmanager
+    def remove_while_locking(locked_context: InstallContext) -> Iterator[None]:
+        assert locked_context is context
+        environment_dir.rmdir()
+        yield
+
+    monkeypatch.setattr(environment_module, "installation_lock", remove_while_locking)
+
+    with pytest.raises(EnvironmentError) as exc_info:
+        remove_environment(context, "office")
+
+    assert exc_info.value.title == "Environment Not Found"
 
 
 def test_restore_snapshot_validates_lockfile_before_replacing_runtime(tmp_path: Path) -> None:

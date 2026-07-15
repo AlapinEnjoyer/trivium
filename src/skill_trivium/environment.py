@@ -388,28 +388,29 @@ def remove_environment(
 ) -> tuple[bool, bool, bool]:
     """Remove an environment and report active, local, and shared state."""
     _validate_or_raise(name)
-    env_scope = scope or context.mode
-    paths = environment_paths(context, scope=env_scope)
-    local_path = paths.env_dir(name)
-    shared_path = _shared_environment_path(paths, name)
-    local_exists = local_path.is_dir()
-    shared_exists = shared_path is not None
-    if not local_exists and not shared_exists:
-        raise EnvironmentError(
-            title="Environment Not Found",
-            lines=(f"No local or shared environment named '{name}' was found.",),
-            exit_code=2,
-        )
+    with installation_lock(context):
+        env_scope = scope or context.mode
+        paths = environment_paths(context, scope=env_scope)
+        local_path = paths.env_dir(name)
+        shared_path = _shared_environment_path(paths, name)
+        local_exists = local_path.is_dir()
+        shared_exists = shared_path is not None
+        if not local_exists and not shared_exists:
+            raise EnvironmentError(
+                title="Environment Not Found",
+                lines=(f"No local or shared environment named '{name}' was found.",),
+                exit_code=2,
+            )
 
-    was_active = env_scope == context.mode and active_environment_name(context) == name
-    if was_active:
-        deactivate_environment_without_sync(context)
+        was_active = env_scope == context.mode and active_environment_name(context) == name
+        if was_active:
+            deactivate_environment_without_sync(context)
 
-    if local_exists:
-        shutil.rmtree(local_path)
-    if shared_path is not None and shared_path.exists():
-        shared_path.unlink()
-    return was_active, local_exists, shared_exists
+        if local_exists:
+            shutil.rmtree(local_path)
+        if shared_path is not None and shared_path.exists():
+            shared_path.unlink()
+        return was_active, local_exists, shared_exists
 
 
 def ensure_active_environment_runtime_is_clean(context: InstallContext) -> str | None:

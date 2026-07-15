@@ -513,8 +513,7 @@ def remove_env(
     """Remove a named environment from the selected scope."""
     context = resolve_install_context(global_)
     try:
-        with installation_lock(context):
-            was_active, removed_local, removed_shared = remove_environment(context, name)
+        was_active, removed_local, removed_shared = remove_environment(context, name)
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
