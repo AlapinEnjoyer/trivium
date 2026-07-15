@@ -10,6 +10,7 @@ import shutil
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import yaml
 
@@ -136,7 +137,23 @@ def write_skill_document(skill_file: Path, frontmatter: dict[str, object], body:
         frontmatter: YAML-compatible frontmatter mapping.
         body: Markdown content following the frontmatter.
     """
-    skill_file.write_text(render_skill_document(frontmatter, body), encoding="utf-8")
+    rendered = render_skill_document(frontmatter, body)
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=skill_file.parent,
+            prefix=f".{skill_file.name}.",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(rendered)
+        shutil.copymode(skill_file, temporary_path)
+        temporary_path.replace(skill_file)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def hash_skill_directory(skill_dir: Path, *, skill_document: str | None = None) -> str:
@@ -187,10 +204,28 @@ def install_skill_tree(parsed_skill: ParsedSkill, destination: Path) -> None:
         OSError: If the existing tree cannot be removed or the new tree cannot
             be copied or written.
     """
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(parsed_skill.directory, destination)
-    write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(
+        prefix=f".{destination.name}.",
+        dir=destination.parent,
+        ignore_cleanup_errors=True,
+    ) as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        staged_skill = temp_dir / "skill"
+        previous_skill = temp_dir / "previous"
+        shutil.copytree(parsed_skill.directory, staged_skill)
+        write_skill_document(staged_skill / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
+
+        if destination.exists():
+            destination.replace(previous_skill)
+        try:
+            staged_skill.replace(destination)
+        except OSError:
+            if destination.exists():
+                shutil.rmtree(destination)
+            if previous_skill.exists():
+                previous_skill.replace(destination)
+            raise
 
 
 def rewrite_normalized_skill_document_if_needed(parsed_skill: ParsedSkill, destination: Path) -> bool:

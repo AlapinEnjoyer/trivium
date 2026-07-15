@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 import skill_trivium.update as update_module
-from skill_trivium.lockfile import write_lockfile
-from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry
+from skill_trivium.lockfile import load_lockfile, write_lockfile
+from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry, SourceUpdateResult
 from skill_trivium.update import run_update
 
 
@@ -43,6 +43,42 @@ def test_run_update_dry_run_does_not_acquire_mutation_lock(tmp_path: Path, monke
     outcome = run_update(context=context, requested_skills=[], dry_run=True)
 
     assert outcome.nothing_installed
+
+
+def test_run_update_restores_runtime_when_lockfile_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore updated skill trees when the lockfile cannot be committed."""
+    context = _make_context(tmp_path)
+    skill_dir = context.install_path_for("alpha")
+    skill_dir.mkdir(parents=True)
+    installed_document = skill_dir / "SKILL.md"
+    installed_document.write_text("previous", encoding="utf-8")
+    original_entry = _make_entry("alpha")
+    write_lockfile(context, LockfileData(skills={"alpha": original_entry}))
+    updated_entry = _make_entry("alpha")
+    updated_entry.commit_hash = "updated"
+
+    def update_source(
+        _entries: list[SkillLockEntry],
+        update_context: InstallContext,
+        _dry_run: bool,
+    ) -> SourceUpdateResult:
+        update_context.install_path_for("alpha").joinpath("SKILL.md").write_text("updated", encoding="utf-8")
+        return SourceUpdateResult(updated={"alpha": updated_entry})
+
+    def failed_write(_context: InstallContext, _lockfile: LockfileData) -> None:
+        raise OSError("simulated lockfile failure")
+
+    monkeypatch.setattr(update_module, "_update_source_group", update_source)
+    monkeypatch.setattr(update_module, "write_lockfile", failed_write)
+
+    with pytest.raises(OSError, match="simulated lockfile failure"):
+        run_update(context=context, requested_skills=[], dry_run=False)
+
+    assert installed_document.read_text(encoding="utf-8") == "previous"
+    assert load_lockfile(context.lockfile_path, expected_mode="project").skills["alpha"].commit_hash == "abc123"
 
 
 def _make_context(tmp_path: Path) -> InstallContext:

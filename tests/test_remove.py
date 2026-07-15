@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import skill_trivium.remove as remove_module
+from skill_trivium.environment import EnvironmentError
 from skill_trivium.lockfile import load_lockfile, write_lockfile
 from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry
 from skill_trivium.remove import run_remove
@@ -50,6 +51,53 @@ def test_run_remove_does_not_mutate_when_locked_state_is_missing_a_skill(
     assert skill_dir.is_dir()
     assert sorted(load_lockfile(context.lockfile_path, expected_mode="project").skills) == ["alpha"]
     assert synchronized == []
+
+
+def test_run_remove_restores_runtime_when_lockfile_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore removed skill trees when the lockfile cannot be committed."""
+    context = _make_context(tmp_path)
+    skill_dir = context.install_path_for("alpha")
+    skill_dir.mkdir(parents=True)
+    installed_document = skill_dir / "SKILL.md"
+    installed_document.write_text("alpha", encoding="utf-8")
+    write_lockfile(context, LockfileData(skills={"alpha": _make_entry("alpha")}))
+
+    def failed_write(_context: InstallContext, _lockfile: LockfileData) -> None:
+        raise OSError("simulated lockfile failure")
+
+    monkeypatch.setattr(remove_module, "write_lockfile", failed_write)
+
+    with pytest.raises(OSError, match="simulated lockfile failure"):
+        run_remove(context, ["alpha"])
+
+    assert installed_document.read_text(encoding="utf-8") == "alpha"
+    assert sorted(load_lockfile(context.lockfile_path, expected_mode="project").skills) == ["alpha"]
+
+
+def test_run_remove_keeps_committed_runtime_when_environment_sync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat environment synchronization as post-commit reconciliation."""
+    context = _make_context(tmp_path)
+    skill_dir = context.install_path_for("alpha")
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("alpha", encoding="utf-8")
+    write_lockfile(context, LockfileData(skills={"alpha": _make_entry("alpha")}))
+
+    def failed_sync(_context: InstallContext) -> None:
+        raise EnvironmentError(title="Sync Failed", lines=("simulated sync failure",))
+
+    monkeypatch.setattr(remove_module, "sync_active_environment", failed_sync)
+
+    with pytest.raises(EnvironmentError, match="simulated sync failure"):
+        run_remove(context, ["alpha"])
+
+    assert not skill_dir.exists()
+    assert load_lockfile(context.lockfile_path, expected_mode="project").skills == {}
 
 
 def _make_context(tmp_path: Path) -> InstallContext:

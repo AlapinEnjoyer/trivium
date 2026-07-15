@@ -26,6 +26,7 @@ from skill_trivium.models import (
     UpdateWarning,
     ValidationIssue,
 )
+from skill_trivium.mutation import RuntimeMutation
 from skill_trivium.skills import (
     build_lock_entry,
     hash_parsed_skill,
@@ -115,6 +116,38 @@ def _run_update(
     for entry in target_entries.values():
         grouped_entries[entry.source_url].append(entry)
 
+    if dry_run:
+        return _process_update_sources(
+            grouped_entries=grouped_entries,
+            lockfile=lockfile,
+            context=context,
+            dry_run=True,
+        )
+
+    with RuntimeMutation(context) as mutation:
+        outcome = _process_update_sources(
+            grouped_entries=grouped_entries,
+            lockfile=lockfile,
+            context=context,
+            dry_run=False,
+        )
+        if outcome.lockfile_changed:
+            write_lockfile(context, lockfile)
+        mutation.commit()
+
+    if outcome.runtime_changed:
+        sync_active_environment(context)
+
+    return outcome
+
+
+def _process_update_sources(
+    *,
+    grouped_entries: dict[str, list[SkillLockEntry]],
+    lockfile: LockfileData,
+    context: InstallContext,
+    dry_run: bool,
+) -> UpdateOutcome:
     outcome = UpdateOutcome()
     with progress_bar() as progress:
         future_map = {}
@@ -134,12 +167,6 @@ def _run_update(
                     dry_run=dry_run,
                     outcome=outcome,
                 )
-
-    if outcome.lockfile_changed and not dry_run:
-        write_lockfile(context, lockfile)
-
-    if outcome.runtime_changed and not dry_run:
-        sync_active_environment(context)
 
     return outcome
 

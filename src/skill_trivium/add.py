@@ -24,6 +24,7 @@ from skill_trivium.environment import (
 from skill_trivium.git import GitCloneError, cloned_repo
 from skill_trivium.lockfile import installation_lock, load_lockfile, write_lockfile
 from skill_trivium.models import InstallContext, LockfileData, ParsedSkill, SkillLockEntry, ValidationIssue
+from skill_trivium.mutation import RuntimeMutation
 from skill_trivium.skills import (
     build_lock_entry,
     discover_skills_path,
@@ -274,9 +275,6 @@ def _run_add(
                     )
 
                     runtime_changed = bool(resolution.pending_installs)
-                    if resolution.pending_installs and not dry_run:
-                        write_lockfile(context, lockfile)
-
                     if runtime_changed and not dry_run:
                         sync_active_environment(context)
 
@@ -558,24 +556,37 @@ def _apply_pending_installs(
     installed: list[str],
     would_install: list[str],
 ) -> None:
-    for parsed_skill in pending_installs:
-        entry = build_lock_entry(
-            parsed_skill=parsed_skill,
-            source_url=source_url,
-            commit_hash=commit_hash,
-            skills_path=skills_path,
-            context=context,
-            installed_at=utc_now(),
+    pending_entries = [
+        (
+            parsed_skill,
+            build_lock_entry(
+                parsed_skill=parsed_skill,
+                source_url=source_url,
+                commit_hash=commit_hash,
+                skills_path=skills_path,
+                context=context,
+                installed_at=utc_now(),
+            ),
         )
-        if dry_run:
-            would_install.append(parsed_skill.name)
-            continue
-        ensure_storage(context)
-        destination = context.install_path_for(parsed_skill.name)
-        install_skill_tree(parsed_skill, destination)
-        _print_conversion_warnings(parsed_skill)
-        lockfile.skills[parsed_skill.name] = entry
-        installed.append(parsed_skill.name)
+        for parsed_skill in pending_installs
+    ]
+    if dry_run:
+        would_install.extend(parsed_skill.name for parsed_skill, _entry in pending_entries)
+        return
+    if not pending_entries:
+        return
+
+    with RuntimeMutation(context) as mutation:
+        for parsed_skill, entry in pending_entries:
+            ensure_storage(context)
+            destination = context.install_path_for(parsed_skill.name)
+            install_skill_tree(parsed_skill, destination)
+            _print_conversion_warnings(parsed_skill)
+            lockfile.skills[parsed_skill.name] = entry
+            installed.append(parsed_skill.name)
+
+        write_lockfile(context, lockfile)
+        mutation.commit()
 
 
 def _print_conversion_warnings(parsed_skill: ParsedSkill) -> None:

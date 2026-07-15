@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import skill_trivium.skills as skills_module
 from skill_trivium.models import InstallContext
 from skill_trivium.skills import (
     discover_skills_path,
@@ -17,6 +18,7 @@ from skill_trivium.skills import (
     parse_skill_document,
     validate_skill_directory,
     validate_skill_name,
+    write_skill_document,
 )
 
 
@@ -96,6 +98,63 @@ def test_install_skill_tree_hashes_normalized_content_and_removes_stale_files(tm
     assert not (destination / "stale.txt").exists()
     assert (destination / "asset.txt").read_text(encoding="utf-8") == "current"
     assert hash_skill_directory(destination) == hash_parsed_skill(parsed)
+
+
+def test_install_skill_tree_preserves_destination_when_staging_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the installed skill when copying its staged replacement fails."""
+    source = tmp_path / "source" / "alpha"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("---\nname: alpha\ndescription: Alpha\n---\n", encoding="utf-8")
+    parsed, issues = validate_skill_directory(source)
+    assert issues == []
+    assert parsed is not None
+    destination = tmp_path / "installed" / "alpha"
+    destination.mkdir(parents=True)
+    installed_document = destination / "SKILL.md"
+    installed_document.write_text("previous", encoding="utf-8")
+
+    def failed_copy(*args: object, **kwargs: object) -> None:
+        raise OSError("simulated copy failure")
+
+    monkeypatch.setattr(skills_module.shutil, "copytree", failed_copy)
+
+    with pytest.raises(OSError, match="simulated copy failure"):
+        install_skill_tree(parsed, destination)
+
+    assert installed_document.read_text(encoding="utf-8") == "previous"
+
+
+def test_write_skill_document_preserves_previous_content_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the installed document when its atomic replacement fails."""
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("previous", encoding="utf-8")
+
+    def failed_replace(source: Path, destination: Path) -> Path:
+        raise OSError("simulated document replacement failure")
+
+    monkeypatch.setattr(Path, "replace", failed_replace)
+
+    with pytest.raises(OSError, match="simulated document replacement failure"):
+        write_skill_document(skill_file, {"name": "alpha", "description": "Alpha"}, "")
+
+    assert skill_file.read_text(encoding="utf-8") == "previous"
+
+
+def test_write_skill_document_preserves_file_permissions(tmp_path: Path) -> None:
+    """Retain document permissions across atomic normalization writes."""
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("previous", encoding="utf-8")
+    skill_file.chmod(0o640)
+
+    write_skill_document(skill_file, {"name": "alpha", "description": "Alpha"}, "")
+
+    assert skill_file.stat().st_mode & 0o777 == 0o640
 
 
 @pytest.mark.parametrize("unsafe_name", ["../escape", "/tmp/escape", ".", "..", ""])

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from skill_trivium.environment import ensure_active_environment_runtime_is_clean, sync_active_environment
 from skill_trivium.lockfile import installation_lock, load_lockfile, write_lockfile
 from skill_trivium.models import InstallContext
+from skill_trivium.mutation import RuntimeMutation
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,12 +42,14 @@ def run_remove(context: InstallContext, skill_names: list[str]) -> RemoveOutcome
         if missing:
             return RemoveOutcome(missing=missing)
 
-        for name in target_names:
-            skill_dir = context.install_path_for(name)
-            if skill_dir.exists():
-                shutil.rmtree(skill_dir)
-            lockfile.skills.pop(name)
+        with RuntimeMutation(context) as mutation:
+            for name in target_names:
+                skill_dir = context.install_path_for(name)
+                if skill_dir.exists():
+                    shutil.rmtree(skill_dir)
+                lockfile.skills.pop(name)
 
-        write_lockfile(context, lockfile)
+            write_lockfile(context, lockfile)
+            mutation.commit()
         sync_active_environment(context)
     return RemoveOutcome(removed=target_names)
