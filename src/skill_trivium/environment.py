@@ -241,65 +241,66 @@ def create_environment(
             runtime cannot be safely captured.
     """
     _validate_or_raise(name)
-    env_scope = scope or context.mode
-    paths = environment_paths(context, scope=env_scope)
-    if shared and paths.shared_envs_dir is None:
-        raise EnvironmentError(
-            title="Shared Environments Unsupported",
-            lines=("Shared environments are only available in project mode.",),
-            exit_code=2,
-        )
-    local_dir = paths.env_dir(name)
-    shared_path = _shared_environment_file(paths, name)
-    local_exists = local_dir.is_dir()
-    shared_exists = shared_path is not None and shared_path.exists()
+    with installation_lock(context):
+        env_scope = scope or context.mode
+        paths = environment_paths(context, scope=env_scope)
+        if shared and paths.shared_envs_dir is None:
+            raise EnvironmentError(
+                title="Shared Environments Unsupported",
+                lines=("Shared environments are only available in project mode.",),
+                exit_code=2,
+            )
+        local_dir = paths.env_dir(name)
+        shared_path = _shared_environment_file(paths, name)
+        local_exists = local_dir.is_dir()
+        shared_exists = shared_path is not None and shared_path.exists()
 
-    if empty:
+        if empty:
+            if local_exists:
+                _raise_environment_exists(name, location="local")
+            if shared and shared_exists:
+                _raise_environment_exists(name, location="shared")
+            lockfile = LockfileData()
+            _write_environment_snapshot(
+                local_dir,
+                lockfile=lockfile,
+                source_skills_dir=None,
+                environment_name=name,
+                mode=context.mode,
+            )
+            if shared:
+                _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
+            return _build_environment_record(paths, name, active=False)
+
         if local_exists:
-            _raise_environment_exists(name, location="local")
-        if shared and shared_exists:
+            if shared and not shared_exists:
+                lockfile = load_lockfile(local_dir / LOCKFILE_NAME)
+                _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
+                return _build_environment_record(
+                    paths,
+                    name,
+                    active=env_scope == context.mode and load_environment_state(context).active == name,
+                )
+            _raise_environment_exists(name, location="local-and-shared" if shared_exists else "local")
+        if shared_exists:
             _raise_environment_exists(name, location="shared")
-        lockfile = LockfileData()
+
+        capture_context = context if context.mode == "project" else _project_capture_context(context)
+        snapshot = load_runtime_snapshot(capture_context, require_content_hashes=True)
         _write_environment_snapshot(
             local_dir,
-            lockfile=lockfile,
-            source_skills_dir=None,
+            lockfile=snapshot.lockfile,
+            source_skills_dir=snapshot.skills_dir,
             environment_name=name,
-            mode=context.mode,
+            mode=capture_context.mode,
         )
         if shared:
-            _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
-        return _build_environment_record(paths, name, active=False)
-
-    if local_exists:
-        if shared and not shared_exists:
-            lockfile = load_lockfile(local_dir / LOCKFILE_NAME)
-            _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
-            return _build_environment_record(
-                paths,
-                name,
-                active=env_scope == context.mode and load_environment_state(context).active == name,
-            )
-        _raise_environment_exists(name, location="local-and-shared" if shared_exists else "local")
-    if shared_exists:
-        _raise_environment_exists(name, location="shared")
-
-    capture_context = context if context.mode == "project" else _project_capture_context(context)
-    snapshot = load_runtime_snapshot(capture_context, require_content_hashes=True)
-    _write_environment_snapshot(
-        local_dir,
-        lockfile=snapshot.lockfile,
-        source_skills_dir=snapshot.skills_dir,
-        environment_name=name,
-        mode=capture_context.mode,
-    )
-    if shared:
-        _write_shared_definition(context, name=name, lockfile=snapshot.lockfile, scope=env_scope)
-    return _build_environment_record(
-        paths,
-        name,
-        active=env_scope == context.mode and load_environment_state(context).active == name,
-    )
+            _write_shared_definition(context, name=name, lockfile=snapshot.lockfile, scope=env_scope)
+        return _build_environment_record(
+            paths,
+            name,
+            active=env_scope == context.mode and load_environment_state(context).active == name,
+        )
 
 
 def activate_environment(context: InstallContext, name: str) -> None:

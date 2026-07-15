@@ -15,6 +15,7 @@ from skill_trivium.environment import (
     EnvironmentError,
     EnvironmentState,
     activate_environment,
+    create_environment,
     deactivate_environment,
     environment_paths,
     load_environment_state,
@@ -169,6 +170,29 @@ def test_remove_environment_reloads_snapshot_state_after_acquiring_lock(
         remove_environment(context, "office")
 
     assert exc_info.value.title == "Environment Not Found"
+
+
+def test_create_environment_reloads_conflicts_after_acquiring_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject creation when the environment appears while waiting for the lock."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path)
+    environment_dir = environment_paths(context, scope="project").env_dir("office")
+
+    @contextmanager
+    def create_while_locking(locked_context: InstallContext) -> Iterator[None]:
+        assert locked_context is context
+        environment_dir.mkdir(parents=True)
+        yield
+
+    monkeypatch.setattr(environment_module, "installation_lock", create_while_locking)
+
+    with pytest.raises(EnvironmentError) as exc_info:
+        create_environment(context, name="office", empty=True, shared=False)
+
+    assert exc_info.value.title == "Environment Exists"
 
 
 def test_restore_snapshot_validates_lockfile_before_replacing_runtime(tmp_path: Path) -> None:

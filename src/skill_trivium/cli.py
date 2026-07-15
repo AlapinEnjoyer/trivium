@@ -31,7 +31,7 @@ from skill_trivium.environment import (
     list_environments,
     remove_environment,
 )
-from skill_trivium.lockfile import installation_lock, load_lockfile
+from skill_trivium.lockfile import load_lockfile
 from skill_trivium.models import ValidationIssue
 from skill_trivium.remove import run_remove
 from skill_trivium.skills import (
@@ -434,14 +434,13 @@ def create(
     """Create an environment from the current runtime or as an empty snapshot."""
     context = resolve_install_context(False)
     try:
-        with installation_lock(context):
-            record = create_environment(
-                context,
-                name=name,
-                empty=empty,
-                shared=shared,
-                scope="global" if global_ else None,
-            )
+        record = create_environment(
+            context,
+            name=name,
+            empty=empty,
+            shared=shared,
+            scope="global" if global_ else None,
+        )
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
