@@ -488,8 +488,7 @@ def deactivate(
     """Deactivate the selected runtime environment."""
     context = resolve_install_context(global_)
     try:
-        with installation_lock(context):
-            was_active = deactivate_environment(context)
+        was_active = deactivate_environment(context)
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error

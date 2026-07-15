@@ -349,11 +349,12 @@ def deactivate_environment(context: InstallContext) -> bool:
         EnvironmentError: If the active runtime or default snapshot is missing
             or inconsistent.
     """
-    return _deactivate_environment(context, sync_active=True)
+    with installation_lock(context):
+        return _deactivate_environment(context, sync_active=True)
 
 
 def deactivate_environment_without_sync(context: InstallContext) -> bool:
-    """Deactivate without first copying the current runtime into the environment."""
+    """Deactivate without syncing while the caller holds the installation lock."""
     return _deactivate_environment(context, sync_active=False)
 
 

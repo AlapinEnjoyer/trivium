@@ -15,6 +15,7 @@ from skill_trivium.environment import (
     EnvironmentError,
     EnvironmentState,
     activate_environment,
+    deactivate_environment,
     load_environment_state,
     load_runtime_snapshot,
     sync_active_environment,
@@ -119,6 +120,29 @@ def test_activate_environment_reloads_state_after_acquiring_lock(
 
     assert exc_info.value.title == "Environment Already Active"
     assert load_environment_state(context).active == "office"
+
+
+def test_deactivate_environment_reloads_state_after_acquiring_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observe an environment deactivated while waiting for the mutation lock."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path)
+    write_environment_state(context, EnvironmentState(active="office"))
+
+    @contextmanager
+    def deactivate_while_locking(locked_context: InstallContext) -> Iterator[None]:
+        assert locked_context is context
+        write_environment_state(context, EnvironmentState())
+        yield
+
+    monkeypatch.setattr(environment_module, "installation_lock", deactivate_while_locking)
+
+    was_active = deactivate_environment(context)
+
+    assert not was_active
+    assert load_environment_state(context).active is None
 
 
 def test_restore_snapshot_validates_lockfile_before_replacing_runtime(tmp_path: Path) -> None:
