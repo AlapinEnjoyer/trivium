@@ -16,7 +16,7 @@ from skill_trivium.environment import (
     sync_active_environment,
 )
 from skill_trivium.git import GitCloneError, cloned_repo
-from skill_trivium.lockfile import write_lockfile
+from skill_trivium.lockfile import installation_lock, load_lockfile, write_lockfile
 from skill_trivium.models import (
     InstallContext,
     LockfileData,
@@ -48,12 +48,14 @@ class UpdateOutcome:
     warning_count: int = 0
     lockfile_changed: bool = False
     runtime_changed: bool = False
+    nothing_installed: bool = False
+    missing_names: tuple[str, ...] = ()
 
     def exit_code(self, *, dry_run: bool) -> int | None:
         """Return the CLI exit code implied by this outcome."""
         if self.auth_failure:
             return 5
-        if self.validation_issues:
+        if self.validation_issues or self.missing_names:
             return 2
         if self.general_errors:
             return 1
@@ -64,7 +66,6 @@ class UpdateOutcome:
 
 def run_update(
     *,
-    lockfile: LockfileData,
     context: InstallContext,
     requested_skills: list[str],
     dry_run: bool,
@@ -76,7 +77,6 @@ def run_update(
     revisions and runtime changes are reflected in the returned outcome.
 
     Args:
-        lockfile: Current lockfile whose entries should be considered.
         context: Installation context containing the runtime and destination.
         requested_skills: Names to update, or an empty list for all entries.
         dry_run: Whether to report changes without writing files.
@@ -88,6 +88,27 @@ def run_update(
         EnvironmentError: If an active environment runtime is not clean enough
             to update safely.
     """
+    if dry_run:
+        return _run_update(context=context, requested_skills=requested_skills, dry_run=True)
+
+    with installation_lock(context):
+        return _run_update(context=context, requested_skills=requested_skills, dry_run=False)
+
+
+def _run_update(
+    *,
+    context: InstallContext,
+    requested_skills: list[str],
+    dry_run: bool,
+) -> UpdateOutcome:
+    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
+    if not lockfile.skills:
+        return UpdateOutcome(nothing_installed=True)
+
+    missing_names = tuple(name for name in requested_skills if name not in lockfile.skills)
+    if missing_names:
+        return UpdateOutcome(missing_names=missing_names)
+
     ensure_active_environment_runtime_is_clean(context)
     target_entries = {name: lockfile.skills[name] for name in (requested_skills or sorted(lockfile.skills))}
     grouped_entries: dict[str, list[SkillLockEntry]] = defaultdict(list)

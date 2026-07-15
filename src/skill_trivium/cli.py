@@ -7,7 +7,6 @@ terminal rendering and exit-code decisions at the application boundary.
 
 import json
 import sys
-from contextlib import nullcontext
 from pathlib import Path
 
 import questionary
@@ -176,32 +175,24 @@ def update(
         global_: Update the global installation instead of the current project.
     """
     context = resolve_install_context(global_)
-    lock_context = nullcontext() if dry_run else installation_lock(context)
     try:
-        with lock_context:
-            lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
-            if not lockfile.skills:
-                console.print(make_panel("info", "No Skills Installed", ["Nothing to update."]))
-                raise typer.Exit()
-
-            requested_skills = skills or []
-            missing = [name for name in requested_skills if name not in lockfile.skills]
-            if missing:
-                for name in missing:
-                    print_validation_issue(
-                        ValidationIssue(skill_name=name, field="name", rule="The requested skill is not installed.")
-                    )
-                raise typer.Exit(code=2)
-
-            outcome = run_update(
-                lockfile=lockfile,
-                context=context,
-                requested_skills=requested_skills,
-                dry_run=dry_run,
-            )
+        outcome = run_update(
+            context=context,
+            requested_skills=skills or [],
+            dry_run=dry_run,
+        )
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
+
+    if outcome.nothing_installed:
+        console.print(make_panel("info", "No Skills Installed", ["Nothing to update."]))
+        return
+
+    for name in outcome.missing_names:
+        print_validation_issue(
+            ValidationIssue(skill_name=name, field="name", rule="The requested skill is not installed.")
+        )
 
     render_update_summary(outcome, dry_run=dry_run)
 
