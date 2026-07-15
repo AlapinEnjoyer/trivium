@@ -173,6 +173,66 @@ def test_deactivate_environment_reloads_state_after_acquiring_lock(
     assert load_environment_state(context).active is None
 
 
+def test_activate_environment_restores_previous_runtime_when_state_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Roll back activation when the active-state commit fails."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path)
+    paths = environment_paths(context, scope="project")
+    paths.env_dir("office").mkdir(parents=True)
+    restored_snapshots: list[Path] = []
+    real_restore = environment_module._restore_snapshot
+
+    def record_restore(snapshot_dir: Path, restore_context: InstallContext) -> None:
+        restored_snapshots.append(snapshot_dir)
+        real_restore(snapshot_dir, restore_context)
+
+    def failed_state_write(_context: InstallContext, _state: EnvironmentState) -> None:
+        raise OSError("simulated state write failure")
+
+    monkeypatch.setattr(environment_module, "_restore_snapshot", record_restore)
+    monkeypatch.setattr(environment_module, "write_environment_state", failed_state_write)
+
+    with pytest.raises(OSError, match="simulated state write failure"):
+        activate_environment(context, "office")
+
+    assert restored_snapshots == [paths.env_dir("office"), paths.default_dir]
+    assert load_environment_state(context).active is None
+
+
+def test_deactivate_environment_restores_active_runtime_when_state_clear_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Roll back deactivation when clearing active state fails."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path)
+    paths = environment_paths(context, scope="project")
+    paths.env_dir("office").mkdir(parents=True)
+    paths.default_dir.mkdir(parents=True)
+    write_environment_state(context, EnvironmentState(active="office"))
+    restored_snapshots: list[Path] = []
+    real_restore = environment_module._restore_snapshot
+
+    def record_restore(snapshot_dir: Path, restore_context: InstallContext) -> None:
+        restored_snapshots.append(snapshot_dir)
+        real_restore(snapshot_dir, restore_context)
+
+    def failed_state_write(_context: InstallContext, _state: EnvironmentState) -> None:
+        raise OSError("simulated state clear failure")
+
+    monkeypatch.setattr(environment_module, "_restore_snapshot", record_restore)
+    monkeypatch.setattr(environment_module, "write_environment_state", failed_state_write)
+
+    with pytest.raises(OSError, match="simulated state clear failure"):
+        deactivate_environment(context)
+
+    assert restored_snapshots == [paths.default_dir, paths.env_dir("office")]
+    assert load_environment_state(context).active == "office"
+
+
 def test_remove_environment_reloads_snapshot_state_after_acquiring_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

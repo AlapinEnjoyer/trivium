@@ -348,11 +348,17 @@ def activate_environment(context: InstallContext, name: str) -> None:
         if state.active is None:
             default_snapshot = load_runtime_snapshot(context, require_content_hashes=True)
             _write_default_snapshot(paths.default_dir, default_snapshot, mode=context.mode)
+            rollback_snapshot = paths.default_dir
         else:
             sync_active_environment(context)
+            rollback_snapshot = paths.env_dir(state.active)
 
-        _restore_snapshot(paths.env_dir(name), context)
-        write_environment_state(context, EnvironmentState(active=name))
+        _restore_snapshot_and_write_state(
+            snapshot_dir=paths.env_dir(name),
+            context=context,
+            state=EnvironmentState(active=name),
+            rollback_snapshot=rollback_snapshot,
+        )
 
 
 def deactivate_environment(context: InstallContext) -> bool:
@@ -395,8 +401,12 @@ def _deactivate_environment(context: InstallContext, *, sync_active: bool) -> bo
             ),
         )
 
-    _restore_snapshot(paths.default_dir, context)
-    write_environment_state(context, EnvironmentState())
+    _restore_snapshot_and_write_state(
+        snapshot_dir=paths.default_dir,
+        context=context,
+        state=EnvironmentState(),
+        rollback_snapshot=paths.env_dir(state.active),
+    )
     return True
 
 
@@ -768,6 +778,21 @@ def _restore_snapshot(snapshot_dir: Path, context: InstallContext) -> None:
             if previous_skills.exists():
                 previous_skills.replace(context.skills_dir)
             raise
+
+
+def _restore_snapshot_and_write_state(
+    *,
+    snapshot_dir: Path,
+    context: InstallContext,
+    state: EnvironmentState,
+    rollback_snapshot: Path,
+) -> None:
+    _restore_snapshot(snapshot_dir, context)
+    try:
+        write_environment_state(context, state)
+    except OSError:
+        _restore_snapshot(rollback_snapshot, context)
+        raise
 
 
 def _rewrite_runtime_lockfile(context: InstallContext, lockfile: LockfileData, *, environment_name: str) -> None:
