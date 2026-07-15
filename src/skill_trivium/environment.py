@@ -18,7 +18,13 @@ import tomli_w
 
 from skill_trivium.context import resolve_install_context
 from skill_trivium.git import GitCheckoutError, GitCloneError, cloned_repo_at_revision
-from skill_trivium.lockfile import LOCKFILE_VERSION, load_lockfile, write_lockfile, write_lockfile_path
+from skill_trivium.lockfile import (
+    LOCKFILE_VERSION,
+    installation_lock,
+    load_lockfile,
+    write_lockfile,
+    write_lockfile_path,
+)
 from skill_trivium.models import InstallContext, LockfileData
 from skill_trivium.skills import (
     MAX_NAME_LENGTH,
@@ -308,24 +314,25 @@ def activate_environment(context: InstallContext, name: str) -> None:
             or the current runtime cannot be captured safely.
     """
     _validate_or_raise(name)
-    paths = environment_paths(context, scope=context.mode)
-    state = load_environment_state(context)
-    if state.active == name:
-        raise EnvironmentError(
-            title="Environment Already Active",
-            lines=(f"The environment '{name}' is already active.",),
-            kind="info",
-        )
+    with installation_lock(context):
+        paths = environment_paths(context, scope=context.mode)
+        state = load_environment_state(context)
+        if state.active == name:
+            raise EnvironmentError(
+                title="Environment Already Active",
+                lines=(f"The environment '{name}' is already active.",),
+                kind="info",
+            )
 
-    _ensure_environment_available(context, name)
-    if state.active is None:
-        default_snapshot = load_runtime_snapshot(context, require_content_hashes=True)
-        _write_default_snapshot(paths.default_dir, default_snapshot, mode=context.mode)
-    else:
-        sync_active_environment(context)
+        _ensure_environment_available(context, name)
+        if state.active is None:
+            default_snapshot = load_runtime_snapshot(context, require_content_hashes=True)
+            _write_default_snapshot(paths.default_dir, default_snapshot, mode=context.mode)
+        else:
+            sync_active_environment(context)
 
-    _restore_snapshot(paths.env_dir(name), context)
-    write_environment_state(context, EnvironmentState(active=name))
+        _restore_snapshot(paths.env_dir(name), context)
+        write_environment_state(context, EnvironmentState(active=name))
 
 
 def deactivate_environment(context: InstallContext) -> bool:

@@ -4,6 +4,8 @@ The cases ensure environment operations reject missing, incomplete, or dirty
 installations without accidentally clearing the active-environment state.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ import skill_trivium.environment as environment_module
 from skill_trivium.environment import (
     EnvironmentError,
     EnvironmentState,
+    activate_environment,
     load_environment_state,
     load_runtime_snapshot,
     sync_active_environment,
@@ -92,6 +95,29 @@ def test_sync_active_environment_reports_missing_snapshot_without_clearing_state
         sync_active_environment(context)
 
     assert exc_info.value.title == "Missing Environment Snapshot"
+    assert load_environment_state(context).active == "office"
+
+
+def test_activate_environment_reloads_state_after_acquiring_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observe an environment activated while waiting for the mutation lock."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path)
+
+    @contextmanager
+    def activate_while_locking(locked_context: InstallContext) -> Iterator[None]:
+        assert locked_context is context
+        write_environment_state(context, EnvironmentState(active="office"))
+        yield
+
+    monkeypatch.setattr(environment_module, "installation_lock", activate_while_locking)
+
+    with pytest.raises(EnvironmentError) as exc_info:
+        activate_environment(context, "office")
+
+    assert exc_info.value.title == "Environment Already Active"
     assert load_environment_state(context).active == "office"
 
 
