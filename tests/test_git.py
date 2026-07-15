@@ -16,6 +16,7 @@ from skill_trivium.git import GitCheckoutError, GitCloneError, checkout_revision
 
 class InteractiveStream(io.StringIO):
     """String stream that behaves like an interactive terminal."""
+
     def isatty(self) -> bool:
         """Report that this stream is attached to a terminal."""
         return True
@@ -23,6 +24,7 @@ class InteractiveStream(io.StringIO):
 
 class FailedCloneProcess:
     """Minimal subprocess double for clone failure tests."""
+
     def __init__(self, stderr: str, returncode: int = 128) -> None:
         """Initialize the process double with stderr and an exit code."""
         self.stderr = io.StringIO(stderr)
@@ -131,6 +133,7 @@ def test_clone_repository_builds_shallow_clone_command(tmp_path: Path, monkeypat
 
 def test_checkout_revision_raises_sanitized_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Convert checkout failures into a sanitized domain exception."""
+
     def fake_run(command: list[str], **kwargs: object) -> object:
         assert command == ["git", "checkout", "--quiet", "missing"]
         assert kwargs["cwd"] == tmp_path

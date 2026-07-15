@@ -148,8 +148,10 @@ trv remove skill1 --global # Remove a global skill
 ```bash
 trv init my-skill           # Minimal scaffold
 trv init my-skill --full    # Include scripts/, references/, assets/
-trv init my-skill --global  # Scaffold in ~/.agents/skills/
+trv init my-skill --global  # Scaffold in ~/.trivium/skills/
 ```
+
+Scaffolds are source trees rather than installed runtime entries. Project scaffolds are created under the project root's `skills/` directory; `--global` uses `~/.trivium/skills/`. Install a completed scaffold through `trv add` when it should become part of a managed runtime.
 
 ### `env` - Manage named environments
 

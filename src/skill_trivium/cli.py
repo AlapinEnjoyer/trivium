@@ -6,8 +6,9 @@ terminal rendering and exit-code decisions at the application boundary.
 """
 
 import json
-import shutil
 import sys
+from contextlib import nullcontext
+from pathlib import Path
 
 import questionary
 import typer
@@ -20,7 +21,7 @@ from rich.table import Table
 
 from skill_trivium import __version__
 from skill_trivium.add import run_add
-from skill_trivium.context import ensure_storage, resolve_install_context
+from skill_trivium.context import resolve_install_context
 from skill_trivium.environment import (
     EnvironmentError,
     activate_environment,
@@ -28,14 +29,12 @@ from skill_trivium.environment import (
     create_environment,
     deactivate_environment,
     describe_environment,
-    ensure_active_environment_runtime_is_clean,
-    ensure_environment_init_allowed,
     list_environments,
     remove_environment,
-    sync_active_environment,
 )
-from skill_trivium.lockfile import load_lockfile, write_lockfile
+from skill_trivium.lockfile import installation_lock, load_lockfile
 from skill_trivium.models import ValidationIssue
+from skill_trivium.remove import run_remove
 from skill_trivium.skills import (
     build_skill_markdown,
     parse_skill_document,
@@ -177,28 +176,29 @@ def update(
         global_: Update the global installation instead of the current project.
     """
     context = resolve_install_context(global_)
+    lock_context = nullcontext() if dry_run else installation_lock(context)
     try:
-        ensure_active_environment_runtime_is_clean(context)
-    except EnvironmentError as error:
-        _print_environment_error(error)
-        raise typer.Exit(code=error.exit_code) from error
+        with lock_context:
+            lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
+            if not lockfile.skills:
+                console.print(make_panel("info", "No Skills Installed", ["Nothing to update."]))
+                raise typer.Exit()
 
-    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
-    if not lockfile.skills:
-        console.print(make_panel("info", "No Skills Installed", ["Nothing to update."]))
-        raise typer.Exit()
+            requested_skills = skills or []
+            missing = [name for name in requested_skills if name not in lockfile.skills]
+            if missing:
+                for name in missing:
+                    print_validation_issue(
+                        ValidationIssue(skill_name=name, field="name", rule="The requested skill is not installed.")
+                    )
+                raise typer.Exit(code=2)
 
-    requested_skills = skills or []
-    missing = [name for name in requested_skills if name not in lockfile.skills]
-    if missing:
-        for name in missing:
-            print_validation_issue(
-                ValidationIssue(skill_name=name, field="name", rule="The requested skill is not installed.")
+            outcome = run_update(
+                lockfile=lockfile,
+                context=context,
+                requested_skills=requested_skills,
+                dry_run=dry_run,
             )
-        raise typer.Exit(code=2)
-
-    try:
-        outcome = run_update(lockfile=lockfile, context=context, requested_skills=requested_skills, dry_run=dry_run)
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
@@ -291,12 +291,6 @@ def remove(
         raise typer.Exit(code=2)
 
     context = resolve_install_context(global_)
-    try:
-        ensure_active_environment_runtime_is_clean(context)
-    except EnvironmentError as error:
-        _print_environment_error(error)
-        raise typer.Exit(code=error.exit_code) from error
-
     lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     if not lockfile.skills:
         console.print(make_panel("info", "No Skills Installed", ["Nothing to remove."]))
@@ -317,25 +311,24 @@ def remove(
             console.print(make_panel("info", "Remove Cancelled", ["No skills were removed."]))
             raise typer.Exit()
 
-    ensure_storage(context)
-    for name in target_names:
-        skill_dir = context.install_path_for(name)
-        if skill_dir.exists():
-            shutil.rmtree(skill_dir)
-        lockfile.skills.pop(name, None)
-
-    write_lockfile(context, lockfile)
     try:
-        sync_active_environment(context)
+        outcome = run_remove(context, target_names)
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
+
+    if outcome.missing:
+        for name in outcome.missing:
+            print_validation_issue(
+                ValidationIssue(skill_name=name, field="name", rule="The requested skill is not installed.")
+            )
+        raise typer.Exit(code=2)
 
     console.print(
         make_panel(
             "ok",
             "Remove Summary",
-            [f"Removed skill '{name}'." for name in target_names],
+            [f"Removed skill '{name}'." for name in outcome.removed],
         )
     )
 
@@ -350,7 +343,7 @@ def init(
         False,
         "--global",
         "-g",
-        help="Create the scaffold in ~/.agents/skills/ regardless of git context.",
+        help="Create the scaffold in ~/.trivium/skills/ regardless of git context.",
     ),
 ) -> None:
     """Create a new skill scaffold in the selected installation context.
@@ -358,21 +351,15 @@ def init(
     Args:
         skill_name: Directory-safe name for the new skill.
         full: Also create ``scripts``, ``references``, and ``assets`` folders.
-        global_: Create the scaffold in the global agent directory.
+        global_: Create the scaffold in the global Trivium source directory.
     """
     validation_issue = _validate_init_name(skill_name)
     if validation_issue is not None:
         print_validation_issue(validation_issue)
         raise typer.Exit(code=2)
 
-    context = resolve_install_context(global_)
-    try:
-        ensure_environment_init_allowed(context)
-    except EnvironmentError as error:
-        _print_environment_error(error)
-        raise typer.Exit(code=error.exit_code) from error
-
-    destination = context.install_path_for(skill_name)
+    source_root = Path.home() / ".trivium" / "skills" if global_ else resolve_install_context(False).base_dir / "skills"
+    destination = source_root / skill_name
     if destination.exists():
         console.print(
             make_panel(
@@ -383,15 +370,11 @@ def init(
         )
         raise typer.Exit(code=1)
 
-    ensure_storage(context)
-    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "SKILL.md").write_text(build_skill_markdown(skill_name), encoding="utf-8")
     if full:
         for directory_name in ("scripts", "references", "assets"):
             (destination / directory_name).mkdir()
-
-    write_lockfile(context, lockfile)
 
     console.print(
         make_panel(
@@ -417,8 +400,8 @@ def list_envs(
     ),
 ) -> None:
     """List environments in the selected scope."""
-    context = resolve_install_context(False)
-    records = list_environments(context, scope="global" if global_ else None)
+    context = resolve_install_context(global_)
+    records = list_environments(context)
 
     table = Table(title="Skill Environments")
     table.add_column("Name", style="bold")
@@ -460,7 +443,14 @@ def create(
     """Create an environment from the current runtime or as an empty snapshot."""
     context = resolve_install_context(False)
     try:
-        record = create_environment(context, name=name, empty=empty, shared=shared, scope="global" if global_ else None)
+        with installation_lock(context):
+            record = create_environment(
+                context,
+                name=name,
+                empty=empty,
+                shared=shared,
+                scope="global" if global_ else None,
+            )
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
@@ -487,7 +477,8 @@ def activate(
     """Activate a named environment in the selected runtime."""
     context = resolve_install_context(global_)
     try:
-        activate_environment(context, name)
+        with installation_lock(context):
+            activate_environment(context, name)
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
@@ -507,7 +498,8 @@ def deactivate(
     """Deactivate the selected runtime environment."""
     context = resolve_install_context(global_)
     try:
-        was_active = deactivate_environment(context)
+        with installation_lock(context):
+            was_active = deactivate_environment(context)
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
@@ -530,13 +522,10 @@ def remove_env(
     ),
 ) -> None:
     """Remove a named environment from the selected scope."""
-    context = resolve_install_context(False)
+    context = resolve_install_context(global_)
     try:
-        was_active, removed_local, removed_shared = remove_environment(
-            context,
-            name,
-            scope="global" if global_ else None,
-        )
+        with installation_lock(context):
+            was_active, removed_local, removed_shared = remove_environment(context, name)
     except EnvironmentError as error:
         _print_environment_error(error)
         raise typer.Exit(code=error.exit_code) from error
@@ -564,10 +553,10 @@ def info_env(
     ),
 ) -> None:
     """Show details for a named or active environment."""
-    context = resolve_install_context(False)
-    details = describe_environment(context, name, scope="global" if global_ else None)
+    context = resolve_install_context(global_)
+    details = describe_environment(context, name)
     if details is None:
-        active = active_environment_name(context) if not global_ else None
+        active = active_environment_name(context)
         if name is None and active is None:
             console.print(make_panel("info", "No Active Environment", ["No environment is currently active."]))
             return

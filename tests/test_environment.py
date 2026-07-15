@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import skill_trivium.environment as environment_module
 from skill_trivium.environment import (
     EnvironmentError,
     EnvironmentState,
@@ -16,7 +17,7 @@ from skill_trivium.environment import (
     sync_active_environment,
     write_environment_state,
 )
-from skill_trivium.lockfile import write_lockfile
+from skill_trivium.lockfile import LockfileError, write_lockfile
 from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry
 
 
@@ -92,3 +93,60 @@ def test_sync_active_environment_reports_missing_snapshot_without_clearing_state
 
     assert exc_info.value.title == "Missing Environment Snapshot"
     assert load_environment_state(context).active == "office"
+
+
+def test_restore_snapshot_validates_lockfile_before_replacing_runtime(tmp_path: Path) -> None:
+    """Keep the current runtime when a replacement snapshot is malformed."""
+    context = make_context(tmp_path)
+    installed_skill = context.install_path_for("alpha")
+    installed_skill.mkdir(parents=True)
+    installed_document = installed_skill / "SKILL.md"
+    installed_document.write_text("original runtime", encoding="utf-8")
+
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_skill = snapshot_dir / "skills" / "alpha"
+    snapshot_skill.mkdir(parents=True)
+    (snapshot_skill / "SKILL.md").write_text("replacement runtime", encoding="utf-8")
+    (snapshot_dir / "skills.lock").write_text("[invalid", encoding="utf-8")
+
+    with pytest.raises(LockfileError):
+        environment_module._restore_snapshot(snapshot_dir, context)
+
+    assert installed_document.read_text(encoding="utf-8") == "original runtime"
+
+
+def test_restore_snapshot_rolls_back_runtime_when_lockfile_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore the previous skill tree when committing a snapshot fails."""
+    context = make_context(tmp_path)
+    installed_skill = context.install_path_for("alpha")
+    installed_skill.mkdir(parents=True)
+    installed_document = installed_skill / "SKILL.md"
+    installed_document.write_text("original runtime", encoding="utf-8")
+
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_skill = snapshot_dir / "skills" / "alpha"
+    snapshot_skill.mkdir(parents=True)
+    (snapshot_skill / "SKILL.md").write_text("replacement runtime", encoding="utf-8")
+    write_lockfile(
+        InstallContext(
+            mode="project",
+            base_dir=snapshot_dir,
+            skills_dir=snapshot_dir / "skills",
+            lockfile_path=snapshot_dir / "skills.lock",
+            install_prefix=Path("skills"),
+        ),
+        LockfileData(),
+    )
+
+    def failed_write(_context: InstallContext, _lockfile: LockfileData) -> None:
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(environment_module, "write_lockfile", failed_write)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        environment_module._restore_snapshot(snapshot_dir, context)
+
+    assert installed_document.read_text(encoding="utf-8") == "original runtime"

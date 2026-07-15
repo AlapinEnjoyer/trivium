@@ -40,6 +40,7 @@ from skill_trivium.ui import console, make_panel, print_validation_issue, progre
 @dataclass(slots=True)
 class UpdateOutcome:
     """Collect update changes, warnings, and the resulting CLI status."""
+
     updated_names: list[str] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
     auth_failure: bool = False

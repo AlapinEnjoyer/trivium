@@ -65,12 +65,25 @@ def test_init_scaffolds_skill_in_project_mode(tmp_path: Path, monkeypatch: pytes
     result = runner.invoke(app, ["init", "demo-skill", "--full"])
 
     assert result.exit_code == 0, result.output
-    skill_dir = project_root / ".agents" / "skills" / "demo-skill"
+    skill_dir = project_root / "skills" / "demo-skill"
     assert (skill_dir / "SKILL.md").is_file()
     assert (skill_dir / "scripts").is_dir()
     assert (skill_dir / "references").is_dir()
     assert (skill_dir / "assets").is_dir()
-    assert (project_root / "skills.lock").is_file()
+    assert not (project_root / "skills.lock").exists()
+
+
+def test_init_scaffolds_skill_in_global_source_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Create a global scaffold outside the managed agent runtime."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    result = runner.invoke(app, ["init", "demo-skill", "--global"])
+
+    assert result.exit_code == 0, result.output
+    assert (fake_home / ".trivium" / "skills" / "demo-skill" / "SKILL.md").is_file()
+    assert not (fake_home / ".agents").exists()
 
 
 def test_init_rejects_invalid_skill_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -537,11 +550,11 @@ def test_add_same_source_readd_is_noop(
     assert load_lockfile(project_root / "skills.lock").skills["repeat-skill"].commit_hash == initial_commit
 
 
-def test_add_same_source_readd_repairs_installed_skill_frontmatter(
+def test_add_same_source_readd_does_not_install_changed_remote_content(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Repair normalized frontmatter during a same-source re-add."""
+    """Keep same-source re-adds from bypassing update and stale lock metadata."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -572,8 +585,10 @@ def test_add_same_source_readd_repairs_installed_skill_frontmatter(
     assert first.exit_code == 0, first.output
 
     installed_path = project_root / ".agents" / "skills" / "learn" / "SKILL.md"
+    installed_content = installed_path.read_text(encoding="utf-8")
+    initial_entry = load_lockfile(project_root / "skills.lock").skills["learn"]
     write_skill(
-        installed_path,
+        remote_repo / "learn" / "SKILL.md",
         "\n".join(
             [
                 "---",
@@ -589,17 +604,18 @@ def test_add_same_source_readd_repairs_installed_skill_frontmatter(
                 "",
                 "## Instructions",
                 "",
-                "Use this skill carefully.",
+                "Changed remote instructions.",
             ]
         ),
     )
+    git_commit(remote_repo, "Change learn skill")
 
     second = runner.invoke(app, ["add", str(remote_repo), "--all"])
 
     assert second.exit_code == 0, second.output
-    frontmatter, _ = parse_skill_document(installed_path)
-    assert frontmatter["allowed-tools"] == "Bash Read"
-    assert not isinstance(frontmatter["allowed-tools"], list)
+    assert "already installed from the same source" in second.output
+    assert installed_path.read_text(encoding="utf-8") == installed_content
+    assert load_lockfile(project_root / "skills.lock").skills["learn"] == initial_entry
 
 
 def test_list_shows_installed_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -899,11 +915,11 @@ def test_update_warns_when_skill_path_or_skill_is_missing(tmp_path: Path, monkey
     assert "re-run `trivium add".lower() in result.output.lower()
 
 
-def test_add_same_source_readd_repairs_installed_skill_metadata_scalar_values(
+def test_add_same_source_readd_does_not_repair_locally_modified_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Repair normalized scalar metadata during a same-source re-add."""
+    """Leave local modifications untouched during a same-source re-add."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -955,9 +971,9 @@ def test_add_same_source_readd_repairs_installed_skill_metadata_scalar_values(
     result = runner.invoke(app, ["add", str(remote_repo), "--all"])
 
     assert result.exit_code == 0, result.output
-    assert "Conversion Warning: capture-api-response-test-fixture" in result.output
+    assert "Skipped: capture-api-response-test-fixture" in result.output
     frontmatter, _ = parse_skill_document(installed_path)
-    assert frontmatter["metadata"] == {"author": "example-org", "internal": "true"}
+    assert frontmatter["metadata"] == {"author": "example-org", "internal": True}
 
 
 def test_global_mode_uses_home_agents_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1182,6 +1198,32 @@ def test_project_captured_global_environment_activates_into_global_runtime(
     assert sorted(global_lockfile.skills) == ["alpha-skill"]
 
 
+def test_env_remove_global_deactivates_active_global_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore the global default runtime before removing its active environment."""
+    remote_repo = create_git_skill_repo(
+        tmp_path / "remote",
+        {"alpha-skill": skill_markdown("alpha-skill", "Alpha skill")},
+    )
+    project_root = make_project_root(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(project_root)
+    assert runner.invoke(app, ["add", str(remote_repo), "--all"]).exit_code == 0
+    assert runner.invoke(app, ["env", "create", "office", "--global"]).exit_code == 0
+    assert runner.invoke(app, ["env", "activate", "office", "--global"]).exit_code == 0
+
+    remove_result = runner.invoke(app, ["env", "remove", "office", "--global"])
+
+    assert remove_result.exit_code == 0, remove_result.output
+    assert "Deactivated it and restored the default runtime first." in remove_result.output
+    assert not (fake_home / ".trivium" / "global" / "state.toml").exists()
+    assert not (fake_home / ".trivium" / "global" / "envs" / "office").exists()
+
+
 def test_env_create_global_shared_is_rejected_without_partial_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1378,8 +1420,8 @@ def test_env_create_fails_when_runtime_contains_unmanaged_skills(
     assert "Unmanaged Skills Detected" in result.output
 
 
-def test_init_is_blocked_while_environment_is_active(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Block init while an environment is active."""
+def test_init_is_allowed_while_environment_is_active(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allow source scaffolding without modifying an active runtime."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"pdf": skill_markdown("pdf", "PDF skill")},
@@ -1396,8 +1438,9 @@ def test_init_is_blocked_while_environment_is_active(tmp_path: Path, monkeypatch
 
     result = runner.invoke(app, ["init", "draft-skill"])
 
-    assert result.exit_code == 2
-    assert "Init Blocked While Environment Is Active" in result.output
+    assert result.exit_code == 0, result.output
+    assert (project_root / "skills" / "draft-skill" / "SKILL.md").is_file()
+    assert not (project_root / ".agents" / "skills" / "draft-skill").exists()
 
 
 def test_env_remove_deletes_local_and_shared_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

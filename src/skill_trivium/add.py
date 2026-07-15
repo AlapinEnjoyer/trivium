@@ -7,6 +7,7 @@ testable without coupling its core logic to a specific progress renderer.
 """
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -28,7 +29,6 @@ from skill_trivium.skills import (
     discover_skills_path,
     enumerate_skill_directories,
     install_skill_tree,
-    rewrite_normalized_skill_document_if_needed,
     utc_now,
     validate_skill_directory,
 )
@@ -67,17 +67,18 @@ class ProgressLike(Protocol):
 @dataclass(slots=True)
 class AddOutcome:
     """Collect the results of an add operation."""
+
     installed: list[str] = field(default_factory=list)
     would_install: list[str] = field(default_factory=list)
     skipped: dict[str, str] = field(default_factory=dict)
     failed: list[str] = field(default_factory=list)
-    repaired: list[str] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class AddResolution:
     """Partition discovered skills by the action required to install them."""
+
     pending_installs: list[ParsedSkill] = field(default_factory=list)
     conflicts: list[tuple[ParsedSkill, SkillLockEntry]] = field(default_factory=list)
     untracked: list[ParsedSkill] = field(default_factory=list)
@@ -124,24 +125,8 @@ def run_add(
             handling requires a command failure exit code.
     """
     context = resolve_install_context(global_)
-    if dry_run:
-        _run_add(
-            ctx=ctx,
-            url=url,
-            all_=all_,
-            skills=skills,
-            path=path,
-            yes=yes,
-            dry_run=dry_run,
-            ignore_validation=ignore_validation,
-            context=context,
-            progress_factory=progress_factory,
-            is_interactive_terminal=is_interactive_terminal,
-            select_conflict=select_conflict,
-        )
-        return
-
-    with installation_lock(context):
+    lock_context = nullcontext() if dry_run else installation_lock(context)
+    with lock_context:
         _run_add(
             ctx=ctx,
             url=url,
@@ -236,8 +221,6 @@ def _run_add(
                         lockfile=lockfile,
                         source_url=url,
                         context=context,
-                        dry_run=dry_run,
-                        repaired=install_outcome.repaired,
                         skipped=install_outcome.skipped,
                     )
 
@@ -290,7 +273,7 @@ def _run_add(
                         would_install=install_outcome.would_install,
                     )
 
-                    runtime_changed = bool(resolution.pending_installs or install_outcome.repaired)
+                    runtime_changed = bool(resolution.pending_installs)
                     if resolution.pending_installs and not dry_run:
                         write_lockfile(context, lockfile)
 
@@ -303,17 +286,6 @@ def _run_add(
                                 "info",
                                 "Conflicts Replaced",
                                 [f"Replaced skill '{name}' with the incoming source." for name in sorted(replaced)],
-                            )
-                        )
-                    if install_outcome.repaired:
-                        console.print(
-                            make_panel(
-                                "info",
-                                "Normalized Installed Skills",
-                                [
-                                    f"Rewrote installed SKILL.md for '{name}' to match normalized metadata."
-                                    for name in install_outcome.repaired
-                                ],
                             )
                         )
             except GitCloneError as error:
@@ -486,8 +458,6 @@ def _classify_add_candidates(
     lockfile: LockfileData,
     source_url: str,
     context: InstallContext,
-    dry_run: bool,
-    repaired: list[str],
     skipped: dict[str, str],
 ) -> AddResolution:
     """Classify parsed skills into pending installs, conflicts, and skipped categories.
@@ -497,8 +467,6 @@ def _classify_add_candidates(
         lockfile (LockfileData): Current lockfile data.
         source_url (str): Source URL of the incoming skills.
         context (InstallContext): Installation context.
-        dry_run (bool): Whether this is a dry run.
-        repaired (list[str]): List to append names of repaired skills.
         skipped (dict[str, str]): Dictionary to append names and reasons for skipped skills.
 
     Returns:
@@ -529,11 +497,6 @@ def _classify_add_candidates(
                 resolution.pending_installs.append(parsed_skill)
             continue
         if existing.source_url == source_url:
-            if not dry_run and rewrite_normalized_skill_document_if_needed(
-                parsed_skill, context.install_path_for(parsed_skill.name)
-            ):
-                repaired.append(parsed_skill.name)
-                _print_conversion_warnings(parsed_skill)
             skipped[parsed_skill.name] = "already installed from the same source"
             continue
         resolution.conflicts.append((parsed_skill, existing))

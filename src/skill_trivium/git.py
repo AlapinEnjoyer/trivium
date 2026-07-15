@@ -17,6 +17,7 @@ from tempfile import TemporaryDirectory
 @dataclass(frozen=True, slots=True)
 class GitCloneError(Exception):
     """Report a failed repository clone and possible authentication guidance."""
+
     source_url: str
     stderr: str
     auth_failure: bool
@@ -30,6 +31,7 @@ class GitCloneError(Exception):
 @dataclass(frozen=True, slots=True)
 class GitCheckoutError(Exception):
     """Report a failed checkout of a requested repository revision."""
+
     source_url: str
     revision: str
     stderr: str

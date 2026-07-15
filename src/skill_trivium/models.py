@@ -15,6 +15,7 @@ Mode = Literal["project", "global"]
 @dataclass(frozen=True, slots=True)
 class InstallContext:
     """Describe where a project or global installation stores its files."""
+
     mode: Mode
     base_dir: Path
     skills_dir: Path
@@ -35,6 +36,7 @@ class InstallContext:
 @dataclass(slots=True)
 class SkillLockEntry:
     """Record the source and installed metadata for one skill."""
+
     name: str
     source_url: str
     commit_hash: str
@@ -99,6 +101,7 @@ class SkillLockEntry:
 @dataclass(slots=True)
 class LockfileData:
     """Represent lockfile metadata and its installed skill entries."""
+
     meta: dict[str, object] = field(default_factory=dict)
     skills: dict[str, SkillLockEntry] = field(default_factory=dict)
 
@@ -113,6 +116,7 @@ class LockfileData:
 @dataclass(frozen=True, slots=True)
 class ParsedSkill:
     """Hold validated and normalized skill document data."""
+
     directory: Path
     name: str
     description: str
@@ -128,6 +132,7 @@ class ParsedSkill:
 @dataclass(frozen=True, slots=True)
 class ValidationIssue:
     """Describe one validation failure for a skill."""
+
     skill_name: str
     field: str
     rule: str
@@ -136,6 +141,7 @@ class ValidationIssue:
 @dataclass(frozen=True, slots=True)
 class UpdateWarning:
     """Describe a non-fatal issue found while refreshing a skill."""
+
     skill_name: str
     message: str
     guidance: str | None = None
@@ -144,6 +150,7 @@ class UpdateWarning:
 @dataclass(slots=True)
 class SourceUpdateResult:
     """Collect the results of updating skills from one source repository."""
+
     refreshed: dict[str, SkillLockEntry] = field(default_factory=dict)
     updated: dict[str, SkillLockEntry] = field(default_factory=dict)
     rewritten: set[str] = field(default_factory=set)

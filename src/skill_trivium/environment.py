@@ -16,6 +16,7 @@ from typing import Literal
 
 import tomli_w
 
+from skill_trivium.context import resolve_install_context
 from skill_trivium.git import GitCheckoutError, GitCloneError, cloned_repo_at_revision
 from skill_trivium.lockfile import LOCKFILE_VERSION, load_lockfile, write_lockfile, write_lockfile_path
 from skill_trivium.models import InstallContext, LockfileData
@@ -39,9 +40,10 @@ SHARED_ENVS_DIR = "environments"
 EnvironmentScope = Literal["project", "global"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class EnvironmentError(Exception):
     """Describe an environment operation failure for CLI rendering."""
+
     title: str
     lines: tuple[str, ...]
     exit_code: int = 1
@@ -55,6 +57,7 @@ class EnvironmentError(Exception):
 @dataclass(frozen=True, slots=True)
 class EnvironmentPaths:
     """Store the filesystem paths belonging to an environment scope."""
+
     state_path: Path
     default_dir: Path
     envs_dir: Path
@@ -68,12 +71,14 @@ class EnvironmentPaths:
 @dataclass(frozen=True, slots=True)
 class EnvironmentState:
     """Store the currently active environment name."""
+
     active: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentRecord:
     """Summarize an environment for list output."""
+
     name: str
     active: bool
     local: bool
@@ -84,6 +89,7 @@ class EnvironmentRecord:
 @dataclass(frozen=True, slots=True)
 class EnvironmentDetails:
     """Describe an environment and the skills in its snapshot."""
+
     name: str
     active: bool
     local: bool
@@ -242,68 +248,45 @@ def create_environment(
     local_exists = local_dir.is_dir()
     shared_exists = shared_path is not None and shared_path.exists()
 
-    if empty and local_exists:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The environment '{name}' already exists locally.",),
-        )
-
-    if empty and shared and shared_exists:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The shared environment '{name}' already exists.",),
-        )
-
     if empty:
+        if local_exists:
+            _raise_environment_exists(name, location="local")
+        if shared and shared_exists:
+            _raise_environment_exists(name, location="shared")
         lockfile = LockfileData()
         _write_environment_snapshot(
             local_dir,
             lockfile=lockfile,
-            create_skills_dir=True,
+            source_skills_dir=None,
             environment_name=name,
             mode=context.mode,
         )
         if shared:
             _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
-        return _build_environment_record(paths, name, active=env_scope == context.mode and False)
+        return _build_environment_record(paths, name, active=False)
 
-    if local_exists and not shared:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The environment '{name}' already exists locally.",),
-        )
-
-    if local_exists and shared_exists:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The environment '{name}' already exists locally and as a shared definition.",),
-        )
-
-    if shared_exists and not local_exists:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The shared environment '{name}' already exists.",),
-        )
-
-    if local_exists and shared and not shared_exists:
-        lockfile = load_lockfile(local_dir / LOCKFILE_NAME)
-        _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
-        return _build_environment_record(
-            paths,
-            name,
-            active=env_scope == context.mode and load_environment_state(context).active == name,
-        )
+    if local_exists:
+        if shared and not shared_exists:
+            lockfile = load_lockfile(local_dir / LOCKFILE_NAME)
+            _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
+            return _build_environment_record(
+                paths,
+                name,
+                active=env_scope == context.mode and load_environment_state(context).active == name,
+            )
+        _raise_environment_exists(name, location="local-and-shared" if shared_exists else "local")
+    if shared_exists:
+        _raise_environment_exists(name, location="shared")
 
     capture_context = context if context.mode == "project" else _project_capture_context(context)
     snapshot = load_runtime_snapshot(capture_context, require_content_hashes=True)
     _write_environment_snapshot(
         local_dir,
         lockfile=snapshot.lockfile,
-        create_skills_dir=True,
+        source_skills_dir=snapshot.skills_dir,
         environment_name=name,
         mode=capture_context.mode,
     )
-    _copy_directory(snapshot.skills_dir, local_dir / "skills")
     if shared:
         _write_shared_definition(context, name=name, lockfile=snapshot.lockfile, scope=env_scope)
     return _build_environment_record(
@@ -337,15 +320,7 @@ def activate_environment(context: InstallContext, name: str) -> None:
     _ensure_environment_available(context, name)
     if state.active is None:
         default_snapshot = load_runtime_snapshot(context, require_content_hashes=True)
-        _write_snapshot_dir(
-            paths.default_dir,
-            lockfile=default_snapshot.lockfile,
-            source_skills_dir=default_snapshot.skills_dir,
-            write_lockfile=default_snapshot.lockfile_present,
-            create_skills_dir=default_snapshot.skills_dir.exists(),
-            environment_name=None,
-            mode=context.mode,
-        )
+        _write_default_snapshot(paths.default_dir, default_snapshot, mode=context.mode)
     else:
         sync_active_environment(context)
 
@@ -367,33 +342,22 @@ def deactivate_environment(context: InstallContext) -> bool:
         EnvironmentError: If the active runtime or default snapshot is missing
             or inconsistent.
     """
-    paths = environment_paths(context, scope=context.mode)
-    state = load_environment_state(context)
-    if state.active is None:
-        return False
-
-    sync_active_environment(context)
-    if not paths.default_dir.is_dir():
-        raise EnvironmentError(
-            title="Missing Default Snapshot",
-            lines=(
-                "The original runtime snapshot is missing.",
-                "Remove the active environment state or recreate the environment locally before deactivating.",
-            ),
-        )
-
-    _restore_snapshot(paths.default_dir, context)
-    write_environment_state(context, EnvironmentState())
-    return True
+    return _deactivate_environment(context, sync_active=True)
 
 
 def deactivate_environment_without_sync(context: InstallContext) -> bool:
     """Deactivate without first copying the current runtime into the environment."""
+    return _deactivate_environment(context, sync_active=False)
+
+
+def _deactivate_environment(context: InstallContext, *, sync_active: bool) -> bool:
     paths = environment_paths(context, scope=context.mode)
     state = load_environment_state(context)
     if state.active is None:
         return False
 
+    if sync_active:
+        sync_active_environment(context)
     if not paths.default_dir.is_dir():
         raise EnvironmentError(
             title="Missing Default Snapshot",
@@ -449,21 +413,6 @@ def ensure_active_environment_runtime_is_clean(context: InstallContext) -> str |
     return active
 
 
-def ensure_environment_init_allowed(context: InstallContext) -> None:
-    """Raise an error when initialization would modify an active environment."""
-    active = active_environment_name(context)
-    if active is None:
-        return
-    raise EnvironmentError(
-        title="Init Blocked While Environment Is Active",
-        lines=(
-            f"The environment '{active}' is active.",
-            "`trv init` creates unmanaged local skills, so deactivate the environment first.",
-        ),
-        exit_code=2,
-    )
-
-
 def sync_active_environment(context: InstallContext) -> str | None:
     """Update the active environment snapshot from the current runtime."""
     active = active_environment_name(context)
@@ -482,12 +431,10 @@ def sync_active_environment(context: InstallContext) -> str | None:
         )
 
     snapshot = load_runtime_snapshot(context, require_content_hashes=True)
-    _write_snapshot_dir(
+    _write_environment_snapshot(
         local_dir,
         lockfile=snapshot.lockfile,
         source_skills_dir=snapshot.skills_dir,
-        write_lockfile=True,
-        create_skills_dir=True,
         environment_name=active,
         mode=context.mode,
     )
@@ -500,6 +447,7 @@ def sync_active_environment(context: InstallContext) -> str | None:
 @dataclass(frozen=True, slots=True)
 class RuntimeSnapshot:
     """Represent a verified runtime lockfile and skills directory."""
+
     lockfile: LockfileData
     skills_dir: Path
     lockfile_present: bool
@@ -627,7 +575,7 @@ def _ensure_environment_available(context: InstallContext, name: str) -> None:
     if context.mode == "project":
         global_paths = environment_paths(context, scope="global")
         if global_paths.env_dir(name).is_dir():
-            _materialize_existing_environment_snapshot(global_paths.env_dir(name), runtime_paths.env_dir(name))
+            _copy_directory(global_paths.env_dir(name), runtime_paths.env_dir(name))
             return
     else:
         global_paths = runtime_paths
@@ -669,10 +617,6 @@ def _load_preferred_environment_lockfile(paths: EnvironmentPaths, name: str) -> 
     return LockfileData()
 
 
-def _load_environment_manifest(shared_path: Path) -> LockfileData:
-    return load_lockfile(shared_path)
-
-
 def _local_environment_names(paths: EnvironmentPaths) -> list[str]:
     if not paths.envs_dir.is_dir():
         return []
@@ -680,7 +624,7 @@ def _local_environment_names(paths: EnvironmentPaths) -> list[str]:
 
 
 def _materialize_shared_environment(context: InstallContext, name: str, shared_path: Path) -> None:
-    manifest = _load_environment_manifest(shared_path)
+    manifest = load_lockfile(shared_path)
     target_dir = environment_paths(context, scope=context.mode).env_dir(name)
 
     with TemporaryDirectory(prefix="trivium-env-") as temp_dir_name:
@@ -718,12 +662,10 @@ def _materialize_shared_environment(context: InstallContext, name: str, shared_p
                         )
                     install_skill_tree(parsed_skill, temp_skills_dir / skill_name)
 
-        _write_snapshot_dir(
+        _write_environment_snapshot(
             target_dir,
             lockfile=manifest,
             source_skills_dir=temp_skills_dir,
-            write_lockfile=True,
-            create_skills_dir=True,
             environment_name=name,
             mode=context.mode,
         )
@@ -740,18 +682,33 @@ def _restore_snapshot(snapshot_dir: Path, context: InstallContext) -> None:
             lines=(f"The snapshot at '{snapshot_dir}' does not exist.",),
         )
 
-    snapshot_skills_dir = snapshot_dir / "skills"
-    if context.skills_dir.exists():
-        shutil.rmtree(context.skills_dir)
-    if snapshot_skills_dir.exists():
-        context.skills_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(snapshot_skills_dir, context.skills_dir, dirs_exist_ok=False)
-
     snapshot_lockfile = snapshot_dir / LOCKFILE_NAME
-    if snapshot_lockfile.is_file():
-        write_lockfile(context, load_lockfile(snapshot_lockfile))
-    elif context.lockfile_path.exists():
-        context.lockfile_path.unlink()
+    lockfile = load_lockfile(snapshot_lockfile) if snapshot_lockfile.is_file() else None
+    snapshot_skills_dir = snapshot_dir / "skills"
+    context.skills_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    with TemporaryDirectory(prefix=".trivium-restore-", dir=context.skills_dir.parent) as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        staged_skills = temp_dir / "skills"
+        previous_skills = temp_dir / "previous-skills"
+        if snapshot_skills_dir.exists():
+            shutil.copytree(snapshot_skills_dir, staged_skills)
+
+        if context.skills_dir.exists():
+            context.skills_dir.replace(previous_skills)
+        try:
+            if staged_skills.exists():
+                staged_skills.replace(context.skills_dir)
+            if lockfile is not None:
+                write_lockfile(context, lockfile)
+            elif context.lockfile_path.exists():
+                context.lockfile_path.unlink()
+        except OSError:
+            if context.skills_dir.exists():
+                shutil.rmtree(context.skills_dir)
+            if previous_skills.exists():
+                previous_skills.replace(context.skills_dir)
+            raise
 
 
 def _rewrite_runtime_lockfile(context: InstallContext, lockfile: LockfileData, *, environment_name: str) -> None:
@@ -793,21 +750,41 @@ def _validate_or_raise(name: str) -> None:
     raise EnvironmentError(title="Invalid Environment Name", lines=(message,), exit_code=2)
 
 
+def _raise_environment_exists(name: str, *, location: Literal["local", "local-and-shared", "shared"]) -> None:
+    if location == "local-and-shared":
+        message = f"The environment '{name}' already exists locally and as a shared definition."
+    elif location == "shared":
+        message = f"The shared environment '{name}' already exists."
+    else:
+        message = f"The environment '{name}' already exists locally."
+    raise EnvironmentError(title="Environment Exists", lines=(message,))
+
+
 def _write_environment_snapshot(
     destination: Path,
     *,
     lockfile: LockfileData,
-    create_skills_dir: bool,
+    source_skills_dir: Path | None,
     environment_name: str,
     mode: str,
 ) -> None:
-    _write_snapshot_dir(
+    _replace_snapshot_dir(
         destination,
         lockfile=lockfile,
-        source_skills_dir=None,
-        write_lockfile=True,
-        create_skills_dir=create_skills_dir,
+        source_skills_dir=source_skills_dir,
+        create_skills_dir=True,
         environment_name=environment_name,
+        mode=mode,
+    )
+
+
+def _write_default_snapshot(destination: Path, snapshot: RuntimeSnapshot, *, mode: str) -> None:
+    _replace_snapshot_dir(
+        destination,
+        lockfile=snapshot.lockfile if snapshot.lockfile_present else None,
+        source_skills_dir=snapshot.skills_dir if snapshot.skills_dir.exists() else None,
+        create_skills_dir=snapshot.skills_dir.exists(),
+        environment_name=None,
         mode=mode,
     )
 
@@ -841,37 +818,17 @@ def _write_shared_definition(
     )
 
 
-def _materialize_existing_environment_snapshot(source: Path, destination: Path) -> None:
-    _copy_directory(source, destination)
-
-
 def _project_capture_context(context: InstallContext) -> InstallContext:
     if context.mode == "project":
         return context
-
-    current = Path.cwd().resolve()
-    project_root = current
-    for candidate in (current, *current.parents):
-        if (candidate / ".git").exists():
-            project_root = candidate
-            break
-
-    install_prefix = Path(".agents") / "skills"
-    return InstallContext(
-        mode="project",
-        base_dir=project_root,
-        skills_dir=project_root / install_prefix,
-        lockfile_path=project_root / LOCKFILE_NAME,
-        install_prefix=install_prefix,
-    )
+    return resolve_install_context(False)
 
 
-def _write_snapshot_dir(
+def _replace_snapshot_dir(
     destination: Path,
     *,
-    lockfile: LockfileData,
+    lockfile: LockfileData | None,
     source_skills_dir: Path | None,
-    write_lockfile: bool,
     create_skills_dir: bool,
     environment_name: str | None,
     mode: str,
@@ -885,7 +842,7 @@ def _write_snapshot_dir(
     if source_skills_dir is not None and source_skills_dir.exists():
         _copy_directory(source_skills_dir, destination / "skills")
 
-    if write_lockfile:
+    if lockfile is not None:
         meta_updates = {
             "version": LOCKFILE_VERSION,
             "mode": mode,

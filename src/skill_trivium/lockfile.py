@@ -25,6 +25,7 @@ LOCKFILE_VERSION = 1
 
 class LockfileError(click.ClickException):
     """Report malformed or incompatible lockfile contents."""
+
     pass
 
 
