@@ -103,6 +103,30 @@ def test_sync_active_environment_reports_missing_snapshot_without_clearing_state
     assert load_environment_state(context).active == "office"
 
 
+def test_write_environment_state_preserves_previous_state_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the previous active state when its atomic replacement fails."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path)
+    write_environment_state(context, EnvironmentState(active="office"))
+    state_path = environment_paths(context, scope="project").state_path
+    real_replace = environment_module.os.replace
+
+    def fail_state_replace(source: Path, destination: Path) -> None:
+        if Path(destination) == state_path:
+            raise OSError("simulated state replacement failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(environment_module.os, "replace", fail_state_replace)
+
+    with pytest.raises(OSError, match="simulated state replacement failure"):
+        write_environment_state(context, EnvironmentState(active="studio"))
+
+    assert load_environment_state(context).active == "office"
+
+
 def test_activate_environment_reloads_state_after_acquiring_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -356,3 +380,64 @@ def test_restore_snapshot_rolls_back_runtime_when_lockfile_write_fails(
         environment_module._restore_snapshot(snapshot_dir, context)
 
     assert installed_document.read_text(encoding="utf-8") == "original runtime"
+
+
+def test_snapshot_write_preserves_previous_snapshot_when_staging_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the previous snapshot when writing its staged replacement fails."""
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+    previous_marker = snapshot_dir / "previous.txt"
+    previous_marker.write_text("previous snapshot", encoding="utf-8")
+    source_skills = tmp_path / "source-skills"
+    source_skills.mkdir()
+
+    def failed_write(*args: object, **kwargs: object) -> None:
+        raise OSError("simulated snapshot write failure")
+
+    monkeypatch.setattr(environment_module, "write_lockfile_path", failed_write)
+
+    with pytest.raises(OSError, match="simulated snapshot write failure"):
+        environment_module._write_environment_snapshot(
+            snapshot_dir,
+            lockfile=LockfileData(),
+            source_skills_dir=source_skills,
+            environment_name="office",
+            mode="project",
+        )
+
+    assert previous_marker.read_text(encoding="utf-8") == "previous snapshot"
+
+
+def test_snapshot_write_restores_previous_snapshot_when_swap_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore the previous snapshot when promoting the staged tree fails."""
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+    previous_marker = snapshot_dir / "previous.txt"
+    previous_marker.write_text("previous snapshot", encoding="utf-8")
+    source_skills = tmp_path / "source-skills"
+    source_skills.mkdir()
+    real_replace = environment_module.os.replace
+
+    def fail_staged_swap(source: Path, destination: Path) -> None:
+        if Path(source).name == "snapshot" and Path(destination) == snapshot_dir:
+            raise OSError("simulated snapshot swap failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(environment_module.os, "replace", fail_staged_swap)
+
+    with pytest.raises(OSError, match="simulated snapshot swap failure"):
+        environment_module._write_environment_snapshot(
+            snapshot_dir,
+            lockfile=LockfileData(),
+            source_skills_dir=source_skills,
+            environment_name="office",
+            mode="project",
+        )
+
+    assert previous_marker.read_text(encoding="utf-8") == "previous snapshot"

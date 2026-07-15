@@ -6,6 +6,7 @@ module also checks for unmanaged or modified skills before capturing or
 switching snapshots.
 """
 
+import os
 import shutil
 import tomllib
 from collections.abc import Iterator
@@ -13,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Literal
 
 import tomli_w
@@ -155,7 +156,23 @@ def write_environment_state(context: InstallContext, state: EnvironmentState) ->
         return
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(tomli_w.dumps({"active": state.active}), encoding="utf-8")
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=state_path.parent,
+            prefix=f".{state_path.name}.",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(tomli_w.dumps({"active": state.active}))
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        temporary_path.replace(state_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def list_environments(context: InstallContext, *, scope: EnvironmentScope | None = None) -> list[EnvironmentRecord]:
@@ -875,9 +892,42 @@ def _replace_snapshot_dir(
     environment_name: str | None,
     mode: str,
 ) -> None:
-    if destination.exists():
-        shutil.rmtree(destination)
-    destination.mkdir(parents=True, exist_ok=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=f".{destination.name}.", dir=destination.parent) as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        staged_snapshot = temp_dir / "snapshot"
+        previous_snapshot = temp_dir / "previous"
+        _write_snapshot_contents(
+            staged_snapshot,
+            lockfile=lockfile,
+            source_skills_dir=source_skills_dir,
+            create_skills_dir=create_skills_dir,
+            environment_name=environment_name,
+            mode=mode,
+        )
+
+        if destination.exists():
+            destination.replace(previous_snapshot)
+        try:
+            staged_snapshot.replace(destination)
+        except OSError:
+            if destination.exists():
+                shutil.rmtree(destination)
+            if previous_snapshot.exists():
+                previous_snapshot.replace(destination)
+            raise
+
+
+def _write_snapshot_contents(
+    destination: Path,
+    *,
+    lockfile: LockfileData | None,
+    source_skills_dir: Path | None,
+    create_skills_dir: bool,
+    environment_name: str | None,
+    mode: str,
+) -> None:
+    destination.mkdir(parents=True)
 
     if create_skills_dir:
         (destination / "skills").mkdir(parents=True, exist_ok=True)
