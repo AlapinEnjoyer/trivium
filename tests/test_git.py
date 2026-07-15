@@ -1,3 +1,9 @@
+"""Verify Git subprocess behavior and conversion of failures into domain errors.
+
+The tests distinguish interactive credential output from non-interactive
+stderr handling and check authentication classification and checkout cleanup.
+"""
+
 import io
 import sys
 from pathlib import Path
@@ -9,22 +15,29 @@ from skill_trivium.git import GitCheckoutError, GitCloneError, checkout_revision
 
 
 class InteractiveStream(io.StringIO):
+    """String stream that behaves like an interactive terminal."""
     def isatty(self) -> bool:
+        """Report that this stream is attached to a terminal."""
         return True
 
 
 class FailedCloneProcess:
+    """Minimal subprocess double for clone failure tests."""
     def __init__(self, stderr: str, returncode: int = 128) -> None:
+        """Initialize the process double with stderr and an exit code."""
         self.stderr = io.StringIO(stderr)
         self.returncode = returncode
 
     def __enter__(self) -> "FailedCloneProcess":
+        """Return the process double as a context manager."""
         return self
 
     def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        """Complete the process context without suppressing errors."""
         pass
 
     def wait(self) -> int:
+        """Return the configured process exit code."""
         return self.returncode
 
 
@@ -32,6 +45,7 @@ def test_clone_repository_displays_git_credential_prompt_in_interactive_terminal
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Show Git credential prompts in an interactive terminal."""
     prompt = "Username for 'https://git.example.com': "
     terminal_output = InteractiveStream()
     monkeypatch.setattr(sys, "stdin", InteractiveStream())
@@ -49,6 +63,7 @@ def test_clone_repository_keeps_stderr_hidden_when_noninteractive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Keep clone stderr hidden in a non-interactive terminal."""
     terminal_output = io.StringIO()
     monkeypatch.setattr(sys, "stdin", io.StringIO())
     monkeypatch.setattr(sys, "stderr", terminal_output)
@@ -69,6 +84,7 @@ def test_clone_repository_classifies_auth_failure_from_later_stderr_line(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Classify authentication failures found after an earlier Git message."""
     stderr = "remote: Access denied\nfatal: Authentication failed for repository\n"
     monkeypatch.setattr(
         git_module.subprocess,
@@ -85,6 +101,7 @@ def test_clone_repository_classifies_auth_failure_from_later_stderr_line(
 
 
 def test_clone_repository_builds_shallow_clone_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build the expected shallow clone command and subprocess options."""
     invocation: dict[str, object] = {}
 
     def fake_popen(command: list[str], **kwargs: object) -> FailedCloneProcess:
@@ -113,6 +130,7 @@ def test_clone_repository_builds_shallow_clone_command(tmp_path: Path, monkeypat
 
 
 def test_checkout_revision_raises_sanitized_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Convert checkout failures into a sanitized domain exception."""
     def fake_run(command: list[str], **kwargs: object) -> object:
         assert command == ["git", "checkout", "--quiet", "missing"]
         assert kwargs["cwd"] == tmp_path

@@ -1,3 +1,9 @@
+"""Verify skill document parsing, repository discovery, and validation rules.
+
+The tests also protect metadata normalization, reproducible content hashes,
+stale-file removal, and rejection of unsafe installation paths.
+"""
+
 from pathlib import Path
 
 import pytest
@@ -24,6 +30,7 @@ from skill_trivium.skills import (
     ],
 )
 def test_parse_skill_document_rejects_invalid_frontmatter(tmp_path: Path, content: str, message: str) -> None:
+    """Reject documents with malformed or non-mapping frontmatter."""
     skill_file = tmp_path / "SKILL.md"
     skill_file.write_text(content, encoding="utf-8")
 
@@ -32,6 +39,7 @@ def test_parse_skill_document_rejects_invalid_frontmatter(tmp_path: Path, conten
 
 
 def test_parse_skill_document_removes_crlf_separator_before_body(tmp_path: Path) -> None:
+    """Normalize a CRLF frontmatter separator before returning the body."""
     skill_file = tmp_path / "SKILL.md"
     skill_file.write_bytes(b"---\r\nname: alpha\r\ndescription: Alpha\r\n---\r\n\r\n## Instructions\r\n")
 
@@ -42,6 +50,7 @@ def test_parse_skill_document_removes_crlf_separator_before_body(tmp_path: Path)
 
 
 def test_discover_skills_path_prefers_skills_directory_and_rejects_escape(tmp_path: Path) -> None:
+    """Prefer the conventional skills directory and reject path escapes."""
     repo = tmp_path / "repo"
     nested_skill = repo / "skills" / "nested"
     root_skill = repo / "root"
@@ -56,15 +65,18 @@ def test_discover_skills_path_prefers_skills_directory_and_rejects_escape(tmp_pa
 
 @pytest.mark.parametrize("name", ["a", "a" * 64, "alpha-2"])
 def test_validate_skill_name_accepts_boundary_values(name: str) -> None:
+    """Accept valid skill names at representative boundaries."""
     assert validate_skill_name(name, skill_name=name, expected_directory=name) == []
 
 
 @pytest.mark.parametrize("name", ["", "a" * 65, "Bad", "-bad", "bad-", "bad--name"])
 def test_validate_skill_name_rejects_invalid_values(name: str) -> None:
+    """Reject invalid skill name forms."""
     assert validate_skill_name(name, skill_name=name)
 
 
 def test_install_skill_tree_hashes_normalized_content_and_removes_stale_files(tmp_path: Path) -> None:
+    """Install normalized content, remove stale files, and preserve hashing."""
     source = tmp_path / "source" / "alpha"
     source.mkdir(parents=True)
     (source / "SKILL.md").write_text(
@@ -88,6 +100,7 @@ def test_install_skill_tree_hashes_normalized_content_and_removes_stale_files(tm
 
 @pytest.mark.parametrize("unsafe_name", ["../escape", "/tmp/escape", ".", "..", ""])
 def test_install_context_rejects_unsafe_skill_paths(tmp_path: Path, unsafe_name: str) -> None:
+    """Reject path traversal and unsafe installation names."""
     context = InstallContext(
         mode="project",
         base_dir=tmp_path,

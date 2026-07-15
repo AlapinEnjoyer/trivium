@@ -1,3 +1,10 @@
+"""Clone repositories and resolve commits used as skill sources.
+
+Git stderr is kept available for interactive credential prompts while errors
+are normalized into domain exceptions with authentication guidance suitable
+for CLI output.
+"""
+
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -9,27 +16,42 @@ from tempfile import TemporaryDirectory
 
 @dataclass(frozen=True, slots=True)
 class GitCloneError(Exception):
+    """Report a failed repository clone and possible authentication guidance."""
     source_url: str
     stderr: str
     auth_failure: bool
     guidance: str | None = None
 
     def __str__(self) -> str:
+        """Return the sanitized Git error text."""
         return self.stderr
 
 
 @dataclass(frozen=True, slots=True)
 class GitCheckoutError(Exception):
+    """Report a failed checkout of a requested repository revision."""
     source_url: str
     revision: str
     stderr: str
 
     def __str__(self) -> str:
+        """Return the sanitized Git error text."""
         return self.stderr
 
 
 @contextmanager
 def cloned_repo(source_url: str) -> Iterator[tuple[Path, str]]:
+    """Clone a repository temporarily and yield its path and commit hash.
+
+    Args:
+        source_url: Git URL to clone.
+
+    Yields:
+        A temporary repository path and the checked-out commit hash.
+
+    Raises:
+        GitCloneError: If cloning fails.
+    """
     with TemporaryDirectory(prefix="trivium-") as temp_dir:
         repo_path = Path(temp_dir) / "repo"
         clone_repository(source_url, repo_path)
@@ -38,6 +60,19 @@ def cloned_repo(source_url: str) -> Iterator[tuple[Path, str]]:
 
 @contextmanager
 def cloned_repo_at_revision(source_url: str, revision: str) -> Iterator[Path]:
+    """Clone a repository, check out a revision, and yield its temporary path.
+
+    Args:
+        source_url: Git URL to clone.
+        revision: Commit, tag, or branch revision to check out.
+
+    Yields:
+        The temporary repository path at the requested revision.
+
+    Raises:
+        GitCloneError: If cloning fails.
+        GitCheckoutError: If the revision cannot be checked out.
+    """
     with TemporaryDirectory(prefix="trivium-") as temp_dir:
         repo_path = Path(temp_dir) / "repo"
         clone_repository(source_url, repo_path, shallow=False)
@@ -46,6 +81,17 @@ def cloned_repo_at_revision(source_url: str, revision: str) -> Iterator[Path]:
 
 
 def clone_repository(source_url: str, destination: Path, *, shallow: bool = True) -> None:
+    """Clone a repository and optionally limit the clone to its latest commit.
+
+    Args:
+        source_url: Git URL to clone.
+        destination: Directory in which Git should create the repository.
+        shallow: Whether to request a single-branch depth-one clone.
+
+    Raises:
+        GitCloneError: If Git exits unsuccessfully. Interactive stderr is also
+            forwarded so credential prompts remain usable.
+    """
     command = ["git", "clone", "--quiet"]
     if shallow:
         command.extend(["--depth", "1", "--single-branch"])
@@ -76,6 +122,17 @@ def clone_repository(source_url: str, destination: Path, *, shallow: bool = True
 
 
 def current_commit(repo_path: Path) -> str:
+    """Read the full commit hash currently checked out in a repository.
+
+    Args:
+        repo_path: Existing local Git repository path.
+
+    Returns:
+        The trimmed output of ``git rev-parse HEAD``.
+
+    Raises:
+        subprocess.CalledProcessError: If the repository has no readable HEAD.
+    """
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repo_path,
@@ -87,6 +144,16 @@ def current_commit(repo_path: Path) -> str:
 
 
 def checkout_revision(repo_path: Path, *, source_url: str, revision: str) -> None:
+    """Check out a revision or raise a sanitized checkout error.
+
+    Args:
+        repo_path: Existing local Git repository path.
+        source_url: Original source URL used for diagnostic context.
+        revision: Commit, tag, or branch revision to check out.
+
+    Raises:
+        GitCheckoutError: If Git cannot resolve or check out the revision.
+    """
     result = subprocess.run(
         ["git", "checkout", "--quiet", revision],
         cwd=repo_path,
@@ -100,11 +167,13 @@ def checkout_revision(repo_path: Path, *, source_url: str, revision: str) -> Non
 
 
 def sanitize_git_error(stderr: str) -> str:
+    """Return the first useful non-empty line from Git stderr."""
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     return lines[0] if lines else "Git command failed."
 
 
 def classify_auth_failure(source_url: str, stderr: str) -> tuple[bool, str | None]:
+    """Classify Git stderr and return authentication guidance when applicable."""
     lowered = stderr.lower()
     patterns = (
         "permission denied",

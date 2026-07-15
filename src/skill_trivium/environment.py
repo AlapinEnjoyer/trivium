@@ -1,3 +1,11 @@
+"""Manage named snapshots of a verified installed-skill runtime.
+
+Environments preserve lockfiles and skill trees, support project-local or
+shared definitions, and can temporarily replace the default runtime. The
+module also checks for unmanaged or modified skills before capturing or
+switching snapshots.
+"""
+
 import shutil
 import tomllib
 from dataclasses import dataclass
@@ -33,33 +41,39 @@ EnvironmentScope = Literal["project", "global"]
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentError(Exception):
+    """Describe an environment operation failure for CLI rendering."""
     title: str
     lines: tuple[str, ...]
     exit_code: int = 1
     kind: str = "err"
 
     def __str__(self) -> str:
+        """Return the environment error messages as one string."""
         return " ".join(self.lines)
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentPaths:
+    """Store the filesystem paths belonging to an environment scope."""
     state_path: Path
     default_dir: Path
     envs_dir: Path
     shared_envs_dir: Path | None
 
     def env_dir(self, name: str) -> Path:
+        """Return the local directory for a named environment."""
         return self.envs_dir / name
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentState:
+    """Store the currently active environment name."""
     active: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentRecord:
+    """Summarize an environment for list output."""
     name: str
     active: bool
     local: bool
@@ -69,6 +83,7 @@ class EnvironmentRecord:
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentDetails:
+    """Describe an environment and the skills in its snapshot."""
     name: str
     active: bool
     local: bool
@@ -77,6 +92,7 @@ class EnvironmentDetails:
 
 
 def validate_environment_name(name: str) -> str | None:
+    """Return a validation error for an environment name, if it is invalid."""
     if not 1 <= len(name) <= MAX_NAME_LENGTH:
         return f"Environment names must be between 1 and {MAX_NAME_LENGTH} characters."
     if name.strip() != name:
@@ -90,10 +106,21 @@ def validate_environment_name(name: str) -> str | None:
 
 
 def active_environment_name(context: InstallContext) -> str | None:
+    """Return the active environment name for an installation context."""
     return load_environment_state(context).active
 
 
 def load_environment_state(context: InstallContext) -> EnvironmentState:
+    """Load the active environment state for an installation context.
+
+    Args:
+        context: Installation context whose project or global state file is
+            read.
+
+    Returns:
+        The active environment name, or an empty state when no state file
+        exists or no valid active name is stored.
+    """
     state_path = environment_paths(context, scope=context.mode).state_path
     if not state_path.exists():
         return EnvironmentState()
@@ -106,6 +133,7 @@ def load_environment_state(context: InstallContext) -> EnvironmentState:
 
 
 def write_environment_state(context: InstallContext, state: EnvironmentState) -> None:
+    """Persist or clear the active environment state."""
     state_path = environment_paths(context, scope=context.mode).state_path
     if state.active is None:
         if state_path.exists():
@@ -117,6 +145,15 @@ def write_environment_state(context: InstallContext, state: EnvironmentState) ->
 
 
 def list_environments(context: InstallContext, *, scope: EnvironmentScope | None = None) -> list[EnvironmentRecord]:
+    """List local and shared environments visible in the requested scope.
+
+    Args:
+        context: Current installation context.
+        scope: Scope to inspect. Defaults to the context's mode.
+
+    Returns:
+        Environment summaries sorted by environment name.
+    """
     env_scope = scope or context.mode
     paths = environment_paths(context, scope=env_scope)
     state = load_environment_state(context)
@@ -145,6 +182,7 @@ def describe_environment(
     *,
     scope: EnvironmentScope | None = None,
 ) -> EnvironmentDetails | None:
+    """Return details for a named environment or the active one."""
     state = load_environment_state(context)
     target_name = name or state.active
     if target_name is None:
@@ -174,6 +212,22 @@ def create_environment(
     shared: bool,
     scope: EnvironmentScope | None = None,
 ) -> EnvironmentRecord:
+    """Create an empty environment or snapshot the verified current runtime.
+
+    Args:
+        context: Installation context whose runtime may be captured.
+        name: New environment name.
+        empty: Whether to create an empty snapshot instead of capturing skills.
+        shared: Whether to write a project-shared environment definition.
+        scope: Storage scope. Defaults to the context's mode.
+
+    Returns:
+        A summary of the newly created environment.
+
+    Raises:
+        EnvironmentError: If the name is invalid, storage conflicts, or the
+            runtime cannot be safely captured.
+    """
     _validate_or_raise(name)
     env_scope = scope or context.mode
     paths = environment_paths(context, scope=env_scope)
@@ -260,6 +314,16 @@ def create_environment(
 
 
 def activate_environment(context: InstallContext, name: str) -> None:
+    """Activate an environment after preserving the current runtime snapshot.
+
+    Args:
+        context: Installation context whose runtime should be replaced.
+        name: Environment to restore.
+
+    Raises:
+        EnvironmentError: If the environment is unavailable, already active,
+            or the current runtime cannot be captured safely.
+    """
     _validate_or_raise(name)
     paths = environment_paths(context, scope=context.mode)
     state = load_environment_state(context)
@@ -290,6 +354,19 @@ def activate_environment(context: InstallContext, name: str) -> None:
 
 
 def deactivate_environment(context: InstallContext) -> bool:
+    """Restore the default runtime snapshot and clear active state.
+
+    Args:
+        context: Installation context whose active environment is restored.
+
+    Returns:
+        ``True`` when an environment was active and deactivated; otherwise
+        ``False``.
+
+    Raises:
+        EnvironmentError: If the active runtime or default snapshot is missing
+            or inconsistent.
+    """
     paths = environment_paths(context, scope=context.mode)
     state = load_environment_state(context)
     if state.active is None:
@@ -311,6 +388,7 @@ def deactivate_environment(context: InstallContext) -> bool:
 
 
 def deactivate_environment_without_sync(context: InstallContext) -> bool:
+    """Deactivate without first copying the current runtime into the environment."""
     paths = environment_paths(context, scope=context.mode)
     state = load_environment_state(context)
     if state.active is None:
@@ -336,6 +414,7 @@ def remove_environment(
     *,
     scope: EnvironmentScope | None = None,
 ) -> tuple[bool, bool, bool]:
+    """Remove an environment and report active, local, and shared state."""
     _validate_or_raise(name)
     env_scope = scope or context.mode
     paths = environment_paths(context, scope=env_scope)
@@ -362,6 +441,7 @@ def remove_environment(
 
 
 def ensure_active_environment_runtime_is_clean(context: InstallContext) -> str | None:
+    """Verify the active runtime and return its environment name."""
     active = active_environment_name(context)
     if active is None:
         return None
@@ -370,6 +450,7 @@ def ensure_active_environment_runtime_is_clean(context: InstallContext) -> str |
 
 
 def ensure_environment_init_allowed(context: InstallContext) -> None:
+    """Raise an error when initialization would modify an active environment."""
     active = active_environment_name(context)
     if active is None:
         return
@@ -384,6 +465,7 @@ def ensure_environment_init_allowed(context: InstallContext) -> None:
 
 
 def sync_active_environment(context: InstallContext) -> str | None:
+    """Update the active environment snapshot from the current runtime."""
     active = active_environment_name(context)
     if active is None:
         return None
@@ -417,12 +499,27 @@ def sync_active_environment(context: InstallContext) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeSnapshot:
+    """Represent a verified runtime lockfile and skills directory."""
     lockfile: LockfileData
     skills_dir: Path
     lockfile_present: bool
 
 
 def load_runtime_snapshot(context: InstallContext, *, require_content_hashes: bool) -> RuntimeSnapshot:
+    """Load and verify runtime state before an environment operation.
+
+    Args:
+        context: Installation context whose lockfile and skill tree are checked.
+        require_content_hashes: Whether every managed skill must have a content
+            hash before the snapshot is accepted.
+
+    Returns:
+        A verified lockfile, skills directory, and lockfile-presence flag.
+
+    Raises:
+        EnvironmentError: If unmanaged, missing, modified, or unverifiable
+            skills are found.
+    """
     lockfile_present = context.lockfile_path.exists()
     lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     skills_dir = context.skills_dir
@@ -488,6 +585,7 @@ def load_runtime_snapshot(context: InstallContext, *, require_content_hashes: bo
 
 
 def environment_paths(context: InstallContext, *, scope: EnvironmentScope) -> EnvironmentPaths:
+    """Resolve storage paths for a project or global environment scope."""
     if scope == "global":
         root = Path.home() / TRIVIUM_HOME_DIR / GLOBAL_DIR
         shared_envs_dir: Path | None = None

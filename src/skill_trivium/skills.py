@@ -1,3 +1,10 @@
+"""Parse and manage the ``SKILL.md`` directories installed by Trivium.
+
+The module discovers repository layouts, validates YAML frontmatter and
+directory names, normalizes compatible metadata, computes reproducible
+content hashes, and copies validated trees into an installation context.
+"""
+
 import re
 import shutil
 from datetime import UTC, datetime
@@ -13,10 +20,24 @@ NAME_PATTERN = re.compile(r"^[a-z0-9]$|^[a-z0-9](?:[a-z0-9]|-(?!-)){0,62}[a-z0-9
 
 
 def utc_now() -> str:
+    """Return the current UTC time in lockfile-friendly ISO format."""
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def discover_skills_path(repo_root: Path, explicit_path: str | None) -> tuple[Path, str] | None:
+    """Resolve the skills container directory within a cloned repository.
+
+    The explicit path is tried first. Without one, the conventional ``skills``
+    directory is preferred, followed by the repository root itself.
+
+    Args:
+        repo_root: Root path of the cloned repository.
+        explicit_path: Optional repository-relative subdirectory to search.
+
+    Returns:
+        The resolved container path and its repository-relative representation,
+        or ``None`` when no valid container contains skill directories.
+    """
     if explicit_path is not None:
         candidate = _resolve_repo_path(repo_root, explicit_path)
         if candidate is None or not candidate.is_dir():
@@ -37,6 +58,15 @@ def discover_skills_path(repo_root: Path, explicit_path: str | None) -> tuple[Pa
 
 
 def enumerate_skill_directories(container_dir: Path) -> list[Path]:
+    """Return sorted child directories containing a ``SKILL.md`` file.
+
+    Args:
+        container_dir: Directory whose immediate children should be inspected.
+
+    Returns:
+        Skill directories ordered by directory name. Missing or non-directory
+        containers produce an empty list.
+    """
     if not container_dir.exists() or not container_dir.is_dir():
         return []
 
@@ -49,6 +79,19 @@ def enumerate_skill_directories(container_dir: Path) -> list[Path]:
 
 
 def parse_skill_document(skill_file: Path) -> tuple[dict[str, object], str]:
+    """Parse YAML frontmatter and the markdown body from a skill document.
+
+    Args:
+        skill_file: Path to a document beginning with a ``---`` frontmatter
+            delimiter.
+
+    Returns:
+        A normalized frontmatter mapping and the markdown body without the
+        separator's leading blank lines.
+
+    Raises:
+        ValueError: If delimiters, YAML, or the frontmatter mapping are invalid.
+    """
     raw_content = skill_file.read_text(encoding="utf-8")
     lines = raw_content.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
@@ -79,16 +122,34 @@ def parse_skill_document(skill_file: Path) -> tuple[dict[str, object], str]:
 
 
 def render_skill_document(frontmatter: dict[str, object], body: str) -> str:
+    """Render normalized frontmatter and markdown body as a skill document."""
     frontmatter_text = yaml.dump(frontmatter, sort_keys=False, allow_unicode=False, default_flow_style=False)
     normalized_body = body.lstrip("\r\n")
     return f"---\n{frontmatter_text}---\n\n{normalized_body}" if normalized_body else f"---\n{frontmatter_text}---\n"
 
 
 def write_skill_document(skill_file: Path, frontmatter: dict[str, object], body: str) -> None:
+    """Render and write a normalized skill document.
+
+    Args:
+        skill_file: Destination ``SKILL.md`` path.
+        frontmatter: YAML-compatible frontmatter mapping.
+        body: Markdown content following the frontmatter.
+    """
     skill_file.write_text(render_skill_document(frontmatter, body), encoding="utf-8")
 
 
 def hash_skill_directory(skill_dir: Path, *, skill_document: str | None = None) -> str:
+    """Hash all files in a skill directory using stable relative paths.
+
+    Args:
+        skill_dir: Directory whose files should be included.
+        skill_document: Optional rendered content to use instead of the on-disk
+            ``SKILL.md`` content.
+
+    Returns:
+        A hexadecimal SHA-256 digest covering relative paths and file content.
+    """
     digest = sha256()
     for path in sorted(skill_dir.rglob("*"), key=lambda item: item.relative_to(skill_dir).as_posix()):
         if path.is_dir():
@@ -107,6 +168,7 @@ def hash_skill_directory(skill_dir: Path, *, skill_document: str | None = None) 
 
 
 def hash_parsed_skill(parsed_skill: ParsedSkill) -> str:
+    """Hash a parsed skill using its normalized document representation."""
     return hash_skill_directory(
         parsed_skill.directory,
         skill_document=render_skill_document(parsed_skill.frontmatter, parsed_skill.body),
@@ -114,6 +176,17 @@ def hash_parsed_skill(parsed_skill: ParsedSkill) -> str:
 
 
 def install_skill_tree(parsed_skill: ParsedSkill, destination: Path) -> None:
+    """Replace a destination with an installed, normalized skill tree.
+
+    Args:
+        parsed_skill: Validated skill whose source tree and normalized document
+            should be copied.
+        destination: Installation directory to replace.
+
+    Raises:
+        OSError: If the existing tree cannot be removed or the new tree cannot
+            be copied or written.
+    """
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(parsed_skill.directory, destination)
@@ -164,6 +237,17 @@ def build_lock_entry(
 def validate_skill_directory(
     skill_dir: Path, *, ignore_validation: bool = False
 ) -> tuple[ParsedSkill | None, list[ValidationIssue]]:
+    """Validate a skill directory and return normalized data and issues.
+
+    Args:
+        skill_dir: Directory expected to contain ``SKILL.md``.
+        ignore_validation: Whether to return normalized data even when issues
+            were found.
+
+    Returns:
+        A parsed skill when processing can continue, together with all
+        validation issues discovered in the directory.
+    """
     issues: list[ValidationIssue] = []
     skill_name = skill_dir.name
     skill_file = skill_dir / "SKILL.md"
@@ -346,6 +430,16 @@ def validate_skill_name(
     skill_name: str,
     expected_directory: str | None = None,
 ) -> list[ValidationIssue]:
+    """Validate a skill name and optional directory-name consistency.
+
+    Args:
+        value: Value supplied by skill frontmatter.
+        skill_name: Name used when reporting validation issues.
+        expected_directory: Directory name that the value must match when set.
+
+    Returns:
+        Validation issues, or an empty list when the name is valid.
+    """
     issues: list[ValidationIssue] = []
     if not isinstance(value, str):
         issues.append(
@@ -389,6 +483,7 @@ def validate_skill_name(
 
 
 def build_skill_markdown(skill_name: str) -> str:
+    """Build the starter markdown document for a new skill."""
     return (
         f"---\n"
         f"name: {skill_name}\n"
@@ -401,6 +496,7 @@ def build_skill_markdown(skill_name: str) -> str:
 
 
 def relative_repo_path(repo_root: Path, target: Path) -> str:
+    """Return a target path relative to a repository root."""
     relative = target.resolve().relative_to(repo_root.resolve())
     relative_text = relative.as_posix()
     return relative_text or "."

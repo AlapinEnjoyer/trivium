@@ -1,3 +1,10 @@
+"""Load, render, atomically write, and exclusively lock skill lockfiles.
+
+Lockfiles preserve source revisions, normalized skill metadata, installation
+paths, and content hashes so commands can reproduce and verify the runtime
+without mutating in-memory models during serialization.
+"""
+
 import fcntl
 import os
 import tomllib
@@ -17,6 +24,7 @@ LOCKFILE_VERSION = 1
 
 
 class LockfileError(click.ClickException):
+    """Report malformed or incompatible lockfile contents."""
     pass
 
 
@@ -25,6 +33,20 @@ def load_lockfile(
     *,
     expected_mode: Literal["project", "global"] | None = None,
 ) -> LockfileData:
+    """Load and validate a TOML lockfile.
+
+    Args:
+        lockfile_path: Path to the lockfile. A missing file represents an empty
+            lockfile.
+        expected_mode: Optional installation mode that the lockfile must use.
+
+    Returns:
+        Parsed lockfile metadata and skill entries.
+
+    Raises:
+        LockfileError: If TOML is malformed, sections have the wrong shape,
+            the version is unsupported, or the mode does not match.
+    """
     if not lockfile_path.exists():
         return LockfileData()
 
@@ -60,6 +82,12 @@ def load_lockfile(
 
 
 def write_lockfile(context: InstallContext, lockfile: LockfileData) -> None:
+    """Write a context lockfile with version, mode, and update metadata.
+
+    Args:
+        context: Installation context that determines the destination and mode.
+        lockfile: Lockfile data to serialize.
+    """
     write_lockfile_path(
         context.lockfile_path,
         lockfile,
@@ -72,6 +100,15 @@ def write_lockfile(context: InstallContext, lockfile: LockfileData) -> None:
 
 
 def render_lockfile(lockfile: LockfileData, *, meta_updates: Mapping[str, object] | None = None) -> str:
+    """Render lockfile data as deterministic TOML without mutating it.
+
+    Args:
+        lockfile: Lockfile data to serialize.
+        meta_updates: Metadata values to overlay in the rendered document.
+
+    Returns:
+        TOML text with skill tables ordered by skill name.
+    """
     payload = lockfile.to_dict()
     meta = dict(lockfile.meta)
     if meta_updates is not None:
@@ -86,6 +123,16 @@ def write_lockfile_path(
     *,
     meta_updates: Mapping[str, object] | None = None,
 ) -> None:
+    """Atomically write lockfile data to a specific path.
+
+    Args:
+        lockfile_path: Destination lockfile path.
+        lockfile: Lockfile data to serialize.
+        meta_updates: Metadata values to overlay in the rendered document.
+
+    Raises:
+        OSError: If the temporary file or replacement cannot be written.
+    """
     lockfile_path.parent.mkdir(parents=True, exist_ok=True)
     rendered = render_lockfile(lockfile, meta_updates=meta_updates)
     temporary_path: Path | None = None
@@ -101,7 +148,7 @@ def write_lockfile_path(
             temporary_file.write(rendered)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-        os.replace(temporary_path, lockfile_path)
+        temporary_path.replace(lockfile_path)
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
@@ -109,6 +156,14 @@ def write_lockfile_path(
 
 @contextmanager
 def installation_lock(context: InstallContext) -> Iterator[None]:
+    """Hold an exclusive filesystem lock for a context lockfile.
+
+    Args:
+        context: Installation context whose lockfile determines the lock path.
+
+    Yields:
+        ``None`` while the caller owns the exclusive lock.
+    """
     context.lockfile_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = context.lockfile_path.with_name(f".{context.lockfile_path.name}.lock")
     with lock_path.open("a+b") as lock_file:

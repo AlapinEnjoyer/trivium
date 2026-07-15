@@ -1,3 +1,9 @@
+"""Verify lockfile parsing, deterministic rendering, validation, and writes.
+
+The cases cover missing and malformed files, mode and version checks, sorted
+round trips, non-mutating serialization, and atomic replacement semantics.
+"""
+
 from pathlib import Path
 
 import pytest
@@ -8,6 +14,7 @@ from skill_trivium.models import LockfileData, SkillLockEntry
 
 
 def make_entry(name: str, *, optional: bool) -> SkillLockEntry:
+    """Build a lock entry with optional metadata fields."""
     return SkillLockEntry(
         name=name,
         source_url="https://example.com/skills.git",
@@ -23,6 +30,7 @@ def make_entry(name: str, *, optional: bool) -> SkillLockEntry:
 
 
 def test_render_and_load_lockfile_round_trip_is_sorted_and_non_mutating(tmp_path: Path) -> None:
+    """Round-trip sorted lockfile data without mutating its input."""
     lockfile = LockfileData(
         meta={"version": 1, "custom": "preserved"},
         skills={"zeta": make_entry("zeta", optional=False), "alpha": make_entry("alpha", optional=True)},
@@ -42,6 +50,7 @@ def test_render_and_load_lockfile_round_trip_is_sorted_and_non_mutating(tmp_path
 
 
 def test_load_lockfile_handles_missing_file_and_rejects_non_mapping_sections(tmp_path: Path) -> None:
+    """Handle missing files and reject malformed lockfile sections."""
     missing = load_lockfile(tmp_path / "missing.lock")
     malformed_path = tmp_path / "malformed.lock"
     malformed_path.write_text('meta = "invalid"\nskills = ["invalid"]\n', encoding="utf-8")
@@ -59,6 +68,7 @@ def test_load_lockfile_handles_missing_file_and_rejects_non_mapping_sections(tmp
     ],
 )
 def test_load_lockfile_rejects_unsupported_version_and_wrong_mode(tmp_path: Path, meta: str, message: str) -> None:
+    """Reject unsupported versions and installation mode mismatches."""
     path = tmp_path / "skills.lock"
     path.write_text(f"[meta]\n{meta}\n\n[skills]\n", encoding="utf-8")
 
@@ -67,6 +77,7 @@ def test_load_lockfile_rejects_unsupported_version_and_wrong_mode(tmp_path: Path
 
 
 def test_write_lockfile_path_replaces_file_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Write a lockfile through one atomic replacement operation."""
     path = tmp_path / "skills.lock"
     path.write_text("old content", encoding="utf-8")
     replacements: list[tuple[Path, Path]] = []

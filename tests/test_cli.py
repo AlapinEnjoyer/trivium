@@ -1,3 +1,9 @@
+"""Exercise CLI commands through Typer's runner and temporary Git projects.
+
+These tests cover command parsing, project and global installations, conflict
+handling, lockfile behavior, updates, and environment lifecycle operations.
+"""
+
 import subprocess
 from pathlib import Path
 
@@ -13,6 +19,7 @@ runner = CliRunner()
 
 
 def test_root_without_args_shows_help() -> None:
+    """Show root help when no command is supplied."""
     result = runner.invoke(app, [])
 
     assert result.exit_code == 2, result.output
@@ -21,6 +28,7 @@ def test_root_without_args_shows_help() -> None:
 
 
 def test_short_help_flag_works_on_root_and_subcommand() -> None:
+    """Support the short help flag on root and subcommands."""
     root_result = runner.invoke(app, ["-h"])
     init_result = runner.invoke(app, ["init", "-h"])
 
@@ -31,6 +39,7 @@ def test_short_help_flag_works_on_root_and_subcommand() -> None:
 
 
 def test_version_flag_shows_version() -> None:
+    """Print the package version from the root callback."""
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0, result.output
@@ -38,6 +47,7 @@ def test_version_flag_shows_version() -> None:
 
 
 def test_init_without_required_argument_shows_help() -> None:
+    """Show init help when its required skill name is missing."""
     result = runner.invoke(app, ["init"])
 
     assert result.exit_code == 2, result.output
@@ -46,6 +56,7 @@ def test_init_without_required_argument_shows_help() -> None:
 
 
 def test_init_scaffolds_skill_in_project_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Create a project-mode skill scaffold."""
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / ".git").mkdir()
@@ -63,6 +74,7 @@ def test_init_scaffolds_skill_in_project_mode(tmp_path: Path, monkeypatch: pytes
 
 
 def test_init_rejects_invalid_skill_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject invalid names during scaffold creation."""
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / ".git").mkdir()
@@ -79,6 +91,7 @@ def test_add_installs_all_valid_skills_and_writes_lockfile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Install all valid repository skills and record them in the lockfile."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -111,6 +124,7 @@ def test_add_installs_all_valid_skills_and_writes_lockfile(
 
 
 def test_add_dry_run_previews_install_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preview an add without writing runtime or lockfile data."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Alpha skill description")},
@@ -131,6 +145,7 @@ def test_add_supports_explicit_path_and_named_skill_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Select named skills from an explicit repository subdirectory."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -157,6 +172,7 @@ def test_add_skips_invalid_skill_but_installs_valid_ones(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Install valid skills while reporting invalid skills."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -179,6 +195,7 @@ def test_add_ignore_validation_installs_invalid_skills(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Install invalid skills when validation is explicitly ignored."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -201,6 +218,7 @@ def test_add_ignore_validation_with_specific_skills(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Apply ignored validation to specifically selected skills."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -222,6 +240,7 @@ def test_add_ignore_validation_no_exit_code_two(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Avoid validation exit code two when ignoring validation."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"bad-skill": "---\nname: bad-skill\n---\n"},
@@ -239,6 +258,7 @@ def test_add_ignore_validation_rejects_unsafe_install_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Continue rejecting unsafe install paths despite ignored validation."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"unsafe-skill": "---\nname: ../escape\ndescription: Unsafe\n---\n"},
@@ -259,6 +279,7 @@ def test_add_ignore_validation_rejects_duplicate_install_names(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Reject duplicate install names during an ignored-validation add."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -281,6 +302,7 @@ def test_add_normalizes_yaml_list_allowed_tools_in_installed_skill(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Normalize YAML list allowed-tools metadata during installation."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -328,6 +350,7 @@ def test_add_normalizes_yaml_scalar_metadata_values_in_installed_skill(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Normalize scalar metadata values during installation."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -381,6 +404,7 @@ def test_add_conflict_without_yes_exits_four_in_non_interactive_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Require explicit conflict resolution in non-interactive mode."""
     existing_repo = create_git_skill_repo(
         tmp_path / "existing",
         {"shared-skill": skill_markdown("shared-skill", "Existing source")},
@@ -405,6 +429,7 @@ def test_add_conflict_with_yes_replaces_existing_skill(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Replace an existing skill when the yes flag is supplied."""
     existing_repo = create_git_skill_repo(
         tmp_path / "existing",
         {"shared-skill": skill_markdown("shared-skill", "Existing source")},
@@ -430,6 +455,7 @@ def test_add_stops_progress_before_interactive_conflict_prompt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Stop progress rendering before an interactive conflict prompt."""
     existing_repo = create_git_skill_repo(
         tmp_path / "existing",
         {"shared-skill": skill_markdown("shared-skill", "Existing source")},
@@ -492,6 +518,7 @@ def test_add_same_source_readd_is_noop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Treat an unchanged same-source re-add as a no-op."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"repeat-skill": skill_markdown("repeat-skill", "Repeat source")},
@@ -514,6 +541,7 @@ def test_add_same_source_readd_repairs_installed_skill_frontmatter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Repair normalized frontmatter during a same-source re-add."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -575,6 +603,7 @@ def test_add_same_source_readd_repairs_installed_skill_frontmatter(
 
 
 def test_list_shows_installed_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """List installed skills in project mode."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Alpha description")},
@@ -591,6 +620,7 @@ def test_list_shows_installed_skills(tmp_path: Path, monkeypatch: pytest.MonkeyP
 def test_list_without_installed_skills_does_not_create_lockfile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Avoid creating a lockfile when listing an empty installation."""
     project_root = make_project_root(tmp_path / "project")
     monkeypatch.chdir(project_root)
 
@@ -602,6 +632,7 @@ def test_list_without_installed_skills_does_not_create_lockfile(
 
 
 def test_ls_is_not_supported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject the unsupported ls alias."""
     project_root = make_project_root(tmp_path / "project")
     monkeypatch.chdir(project_root)
 
@@ -612,6 +643,7 @@ def test_ls_is_not_supported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_list_json_outputs_lockfile_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render the lockfile as JSON for list --json."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Alpha description")},
@@ -628,6 +660,7 @@ def test_list_json_outputs_lockfile_json(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_info_renders_lockfile_metadata_and_markdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render installed metadata and markdown through the info command."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -657,6 +690,7 @@ def test_info_renders_lockfile_metadata_and_markdown(tmp_path: Path, monkeypatch
 
 
 def test_remove_named_skill_and_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove named skills and all skills from an installation."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -681,6 +715,7 @@ def test_remove_named_skill_and_all(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 
 def test_remove_reads_yes_from_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read confirmation input from standard input."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Alpha")},
@@ -697,6 +732,7 @@ def test_remove_reads_yes_from_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_remove_eof_from_stdin_warns_and_cancels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancel removal safely when confirmation input reaches EOF."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Alpha")},
@@ -715,6 +751,7 @@ def test_remove_eof_from_stdin_warns_and_cancels(tmp_path: Path, monkeypatch: py
 
 
 def test_update_refreshes_skill_from_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refresh a changed skill from its remote repository."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Original description")},
@@ -742,6 +779,7 @@ def test_update_refreshes_skill_from_remote(tmp_path: Path, monkeypatch: pytest.
 
 
 def test_update_dry_run_exits_three_when_changes_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return the dry-run change exit code without writing changes."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Original description")},
@@ -765,6 +803,7 @@ def test_update_dry_run_exits_three_when_changes_exist(tmp_path: Path, monkeypat
 def test_update_without_installed_skills_does_not_create_lockfile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Avoid creating a lockfile when updating an empty installation."""
     project_root = make_project_root(tmp_path / "project")
     monkeypatch.chdir(project_root)
 
@@ -776,6 +815,7 @@ def test_update_without_installed_skills_does_not_create_lockfile(
 
 
 def test_update_only_reinstalls_changed_skill_from_shared_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reinstall only the changed skill from a shared source repository."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -809,6 +849,7 @@ def test_update_without_content_hash_only_refreshes_lockfile_for_unchanged_skill
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Refresh legacy lock metadata without reinstalling unchanged content."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Original description")},
@@ -838,6 +879,7 @@ def test_update_without_content_hash_only_refreshes_lockfile_for_unchanged_skill
 
 
 def test_update_warns_when_skill_path_or_skill_is_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report missing source paths and skill directories as warnings."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Alpha description")},
@@ -861,6 +903,7 @@ def test_add_same_source_readd_repairs_installed_skill_metadata_scalar_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Repair normalized scalar metadata during a same-source re-add."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -918,6 +961,7 @@ def test_add_same_source_readd_repairs_installed_skill_metadata_scalar_values(
 
 
 def test_global_mode_uses_home_agents_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install global skills beneath the configured home agents directory."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"global-skill": skill_markdown("global-skill", "Global description")},
@@ -940,6 +984,7 @@ def test_global_mode_merges_sequential_adds_from_multiple_repositories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Merge sequential global adds from multiple repositories."""
     first_repo = create_git_skill_repo(
         tmp_path / "first-remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Alpha description")},
@@ -968,6 +1013,7 @@ def test_global_add_refuses_to_replace_untracked_skill_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Refuse replacing an untracked global skill directory."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"manual-skill": skill_markdown("manual-skill", "Remote description")},
@@ -989,6 +1035,7 @@ def test_global_add_refuses_to_replace_untracked_skill_directory(
 
 
 def test_local_mode_outside_git_repo_uses_current_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use the current directory as the project context outside Git."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"local-skill": skill_markdown("local-skill", "Local description")},
@@ -1012,6 +1059,7 @@ def test_local_mode_outside_git_repo_uses_current_directory(tmp_path: Path, monk
 
 
 def test_add_auth_failure_uses_exit_code_five(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Map Git authentication failures to exit code five."""
     project_root = make_project_root(tmp_path / "project")
     monkeypatch.chdir(project_root)
 
@@ -1023,6 +1071,7 @@ def test_add_auth_failure_uses_exit_code_five(tmp_path: Path, monkeypatch: pytes
 
 
 def test_env_create_captures_current_runtime_and_list_shows_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Capture the current runtime and show the environment in listings."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -1053,6 +1102,7 @@ def test_env_create_captures_current_runtime_and_list_shows_it(tmp_path: Path, m
 
 
 def test_env_create_global_captures_current_project_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Capture a project runtime into a global environment."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -1082,6 +1132,7 @@ def test_env_create_multiple_global_environments_and_reject_duplicate_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Create multiple global environments and reject duplicate names."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Alpha skill")},
@@ -1109,6 +1160,7 @@ def test_project_captured_global_environment_activates_into_global_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Activate a project-captured environment into global runtime."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"alpha-skill": skill_markdown("alpha-skill", "Alpha skill")},
@@ -1134,6 +1186,7 @@ def test_env_create_global_shared_is_rejected_without_partial_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Reject shared global environments without leaving a partial snapshot."""
     project_root = make_project_root(tmp_path / "project")
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -1148,6 +1201,7 @@ def test_env_create_global_shared_is_rejected_without_partial_snapshot(
 
 
 def test_project_can_activate_globally_stored_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Activate a globally stored environment from a project command."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -1177,6 +1231,7 @@ def test_project_can_activate_globally_stored_environment(tmp_path: Path, monkey
 
 
 def test_env_list_global_shows_globally_stored_environments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """List globally stored environments from the environment command."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"pdf": skill_markdown("pdf", "PDF skill")},
@@ -1199,6 +1254,7 @@ def test_env_list_global_shows_globally_stored_environments(tmp_path: Path, monk
 
 
 def test_env_activate_and_deactivate_swaps_runtime_skill_sets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Swap runtime skill sets while activating and deactivating."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -1244,6 +1300,7 @@ def test_env_activate_and_deactivate_swaps_runtime_skill_sets(tmp_path: Path, mo
 
 
 def test_env_activate_shared_materializes_local_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Materialize a local snapshot when activating a shared environment."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"pdf": skill_markdown("pdf", "PDF skill")},
@@ -1270,6 +1327,7 @@ def test_env_activate_shared_materializes_local_snapshot(tmp_path: Path, monkeyp
 
 
 def test_add_updates_active_environment_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Update the active environment snapshot after adding a skill."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -1303,6 +1361,7 @@ def test_add_updates_active_environment_snapshot(tmp_path: Path, monkeypatch: py
 def test_env_create_fails_when_runtime_contains_unmanaged_skills(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Reject environment creation when unmanaged runtime skills exist."""
     project_root = make_project_root(tmp_path / "project")
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -1320,6 +1379,7 @@ def test_env_create_fails_when_runtime_contains_unmanaged_skills(
 
 
 def test_init_is_blocked_while_environment_is_active(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Block init while an environment is active."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"pdf": skill_markdown("pdf", "PDF skill")},
@@ -1341,6 +1401,7 @@ def test_init_is_blocked_while_environment_is_active(tmp_path: Path, monkeypatch
 
 
 def test_env_remove_deletes_local_and_shared_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove both local and shared environment snapshots."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"pdf": skill_markdown("pdf", "PDF skill")},
@@ -1366,6 +1427,7 @@ def test_env_remove_deletes_local_and_shared_environment(tmp_path: Path, monkeyp
 
 
 def test_env_remove_auto_deactivates_active_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deactivate an environment automatically before removing it."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -1396,6 +1458,7 @@ def test_env_remove_auto_deactivates_active_environment(tmp_path: Path, monkeypa
 def test_env_activate_can_materialize_from_shared_lockfile_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Activate a shared environment using only its shared lockfile."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {"pdf": skill_markdown("pdf", "PDF skill")},
@@ -1425,6 +1488,7 @@ def test_env_remove_active_shared_materialized_environment_restores_default_with
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Restore the default runtime when removing an active shared environment."""
     remote_repo = create_git_skill_repo(
         tmp_path / "remote",
         {
@@ -1477,12 +1541,14 @@ def test_env_remove_active_shared_materialized_environment_restores_default_with
 
 
 def make_project_root(path: Path) -> Path:
+    """Create a minimal project root for CLI tests."""
     path.mkdir(parents=True)
     (path / ".git").mkdir()
     return path
 
 
 def create_git_skill_repo(path: Path, skills: dict[str, str], container: str | None = None) -> Path:
+    """Create and commit a temporary Git repository containing skills."""
     path.mkdir(parents=True)
     run(["git", "init", "-b", "main"], cwd=path)
     run(["git", "config", "user.name", "Test User"], cwd=path)
@@ -1500,15 +1566,18 @@ def create_git_skill_repo(path: Path, skills: dict[str, str], container: str | N
 
 
 def git_commit(repo_path: Path, message: str) -> None:
+    """Create a Git commit in a test repository."""
     run(["git", "add", "."], cwd=repo_path)
     run(["git", "commit", "-m", message], cwd=repo_path)
 
 
 def write_skill(path: Path, content: str) -> None:
+    """Write a skill document to a test path."""
     path.write_text(content, encoding="utf-8")
 
 
 def shutil_rmtree(path: Path) -> None:
+    """Remove a directory tree using pathlib operations."""
     if path.exists():
         for child in sorted(path.rglob("*"), reverse=True):
             if child.is_file() or child.is_symlink():
@@ -1519,6 +1588,7 @@ def shutil_rmtree(path: Path) -> None:
 
 
 def run(command: list[str], cwd: Path) -> str:
+    """Run a test subprocess and return stripped standard output."""
     completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=True)
     return completed.stdout.strip()
 
@@ -1533,6 +1603,7 @@ def skill_markdown(
     metadata: dict[str, str] | None = None,
     body: str | None = None,
 ) -> str:
+    """Build skill markdown fixture content."""
     lines = ["---", f"name: {name}", "description: |", f"  {description}"]
     if license is not None:
         lines.append(f"license: {yaml_string(license)}")
@@ -1551,5 +1622,6 @@ def skill_markdown(
 
 
 def yaml_string(value: str) -> str:
+    """Quote a string for YAML fixture content."""
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'

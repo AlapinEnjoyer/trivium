@@ -1,3 +1,9 @@
+"""Verify environment state persistence and runtime snapshot safeguards.
+
+The cases ensure environment operations reject missing, incomplete, or dirty
+installations without accidentally clearing the active-environment state.
+"""
+
 from pathlib import Path
 
 import pytest
@@ -15,6 +21,7 @@ from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry
 
 
 def make_context(tmp_path: Path) -> InstallContext:
+    """Build a project installation context under the test directory."""
     project = tmp_path / "project"
     return InstallContext(
         mode="project",
@@ -26,6 +33,7 @@ def make_context(tmp_path: Path) -> InstallContext:
 
 
 def make_entry(*, content_hash: str | None) -> SkillLockEntry:
+    """Build a representative lockfile entry."""
     return SkillLockEntry(
         name="alpha",
         source_url="https://git.example.com/repo.git",
@@ -52,6 +60,7 @@ def test_load_runtime_snapshot_rejects_inconsistent_runtime(
     state: str,
     expected_title: str,
 ) -> None:
+    """Reject runtime snapshots with missing, stale, or incomplete data."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     context = make_context(tmp_path)
     content_hash = None if state == "missing-hash" else "incorrect-hash"
@@ -73,6 +82,7 @@ def test_sync_active_environment_reports_missing_snapshot_without_clearing_state
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Preserve active state when its snapshot is missing."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     context = make_context(tmp_path)
     write_environment_state(context, EnvironmentState(active="office"))

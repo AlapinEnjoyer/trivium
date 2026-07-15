@@ -1,3 +1,11 @@
+"""Implement the ``trv add`` workflow for remote skill repositories.
+
+This module coordinates repository cloning, skill discovery and validation,
+conflict resolution, installation, lockfile updates, and active-environment
+synchronization. Terminal interaction is injected so the workflow remains
+testable without coupling its core logic to a specific progress renderer.
+"""
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,27 +36,37 @@ from skill_trivium.ui import console, make_panel, print_validation_issue
 
 
 class ProgressLike(Protocol):
-    """
-    Protocol for progress indicator objects used in this workflow.
+    """Protocol for progress indicator objects used in this workflow.
 
     Any object matching this interface can be used for progress reporting,
     including Rich Progress instances or test doubles. This allows
     dependency injection and easier testing.
     """
 
-    def __enter__(self) -> "ProgressLike": ...
+    def __enter__(self) -> "ProgressLike":
+        """Enter the progress display context."""
+        ...
 
-    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None: ...
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        """Exit the progress display context."""
+        ...
 
-    def add_task(self, description: str, total: object = None) -> object: ...
+    def add_task(self, description: str, total: object = None) -> object:
+        """Register a progress task."""
+        ...
 
-    def update(self, task_id: object, completed: int) -> None: ...
+    def update(self, task_id: object, completed: int) -> None:
+        """Update a progress task."""
+        ...
 
-    def stop(self) -> None: ...
+    def stop(self) -> None:
+        """Stop rendering progress."""
+        ...
 
 
 @dataclass(slots=True)
 class AddOutcome:
+    """Collect the results of an add operation."""
     installed: list[str] = field(default_factory=list)
     would_install: list[str] = field(default_factory=list)
     skipped: dict[str, str] = field(default_factory=dict)
@@ -59,6 +77,7 @@ class AddOutcome:
 
 @dataclass(slots=True)
 class AddResolution:
+    """Partition discovered skills by the action required to install them."""
     pending_installs: list[ParsedSkill] = field(default_factory=list)
     conflicts: list[tuple[ParsedSkill, SkillLockEntry]] = field(default_factory=list)
     untracked: list[ParsedSkill] = field(default_factory=list)
@@ -80,6 +99,30 @@ def run_add(
     is_interactive_terminal: Callable[[], bool],
     select_conflict: Callable[[str], str | None],
 ) -> None:
+    """Install selected skills from a remote repository.
+
+    The workflow clones the source, resolves the skills container, validates
+    candidates, resolves conflicts, installs selected trees, and updates the
+    lockfile. Non-dry-run operations are serialized with the installation lock.
+
+    Args:
+        ctx: Typer context used for command-level argument handling.
+        url: Git repository URL containing skill definitions.
+        all_: Whether to install every discovered skill.
+        skills: Optional comma-separated selection of skill names.
+        path: Optional repository-relative skills container path.
+        yes: Whether to replace conflicts without prompting.
+        dry_run: Whether to preview changes without writing them.
+        ignore_validation: Whether to install skills with validation issues.
+        global_: Whether to install into the global skill directory.
+        progress_factory: Factory for the progress display implementation.
+        is_interactive_terminal: Function reporting terminal interactivity.
+        select_conflict: Function used to resolve interactive conflicts.
+
+    Raises:
+        typer.Exit: If repository access, validation, selection, or conflict
+            handling requires a command failure exit code.
+    """
     context = resolve_install_context(global_)
     if dry_run:
         _run_add(
@@ -130,8 +173,7 @@ def _run_add(
     is_interactive_terminal: Callable[[], bool],
     select_conflict: Callable[[str], str | None],
 ) -> None:
-    """
-    Execute the 'trv add' workflow for installing skills from a remote repository.
+    """Execute the 'trv add' workflow for installing skills from a remote repository.
 
     Handles cloning the repository, selecting and validating skills, resolving conflicts,
     and updating the lockfile. Supports dry runs, interactive and non-interactive modes,
@@ -301,8 +343,7 @@ def _run_add(
 
 
 def _parse_add_skill_names(ctx: typer.Context, all_: bool, skills_value: str | None) -> list[str] | None:
-    """
-    Parse and validate skill name arguments for the add command.
+    """Parse and validate skill name arguments for the add command.
 
     If neither --all nor --skills is provided, defaults to --all.
     Ensures that --all and --skills are not both used, and that
@@ -331,8 +372,7 @@ def _parse_add_skill_names(ctx: typer.Context, all_: bool, skills_value: str | N
 
 
 def _resolve_skills_container(repo_path: Path, path: str | None) -> tuple[Path, str]:
-    """
-    Resolve the skills container directory within a cloned repository.
+    """Resolve the skills container directory within a cloned repository.
 
     Attempts to locate the directory containing skill definitions (with SKILL.md files)
     based on the provided repository path and optional subdirectory path. If the directory
@@ -375,8 +415,7 @@ def _select_target_skill_directories(
     validation_issues: list[ValidationIssue],
     failed: list[str],
 ) -> list[Path]:
-    """
-    Select and validate target skill directories from the skills container.
+    """Select and validate target skill directories from the skills container.
 
     If specific skill names are requested, checks for their existence in the skills container.
     Records validation issues and failed names for any missing skills. If no names are requested,
@@ -416,8 +455,7 @@ def _validate_target_skills(
     failed: list[str],
     ignore_validation: bool = False,
 ) -> list[ParsedSkill]:
-    """
-    Validate target skill directories and parse them into ParsedSkill objects.
+    """Validate target skill directories and parse them into ParsedSkill objects.
 
     Args:
         target_directories (list[Path]): List of skill directories to validate.
@@ -452,8 +490,7 @@ def _classify_add_candidates(
     repaired: list[str],
     skipped: dict[str, str],
 ) -> AddResolution:
-    """
-    Classify parsed skills into pending installs, conflicts, and skipped categories.
+    """Classify parsed skills into pending installs, conflicts, and skipped categories.
 
     Args:
         parsed_skills (list[ParsedSkill]): List of parsed skills to classify.
@@ -467,7 +504,6 @@ def _classify_add_candidates(
     Returns:
         AddResolution: Resolution object containing classified skills.
     """
-
     resolution = AddResolution()
     candidate_names: set[str] = set()
     for parsed_skill in parsed_skills:
@@ -513,8 +549,7 @@ def _resolve_conflicts(
     incoming_commit_hash: str,
     skipped: dict[str, str],
 ) -> list[str]:
-    """
-    Resolve conflicts between incoming skills and existing skills in the lockfile.
+    """Resolve conflicts between incoming skills and existing skills in the lockfile.
 
     Args:
         resolution (AddResolution): Resolution object containing classified skills.

@@ -1,3 +1,10 @@
+"""Define the public Typer commands for managing installed agent skills.
+
+The command handlers translate CLI options into the lower-level context,
+repository, lockfile, skill, update, and environment services, while keeping
+terminal rendering and exit-code decisions at the application boundary.
+"""
+
 import json
 import shutil
 import sys
@@ -58,6 +65,7 @@ app.add_typer(env_app, name="env")
 
 
 def version_callback(show_version: bool) -> None:
+    """Print the package version and exit when the version flag is set."""
     if show_version:
         typer.echo(f"trivium {__version__}")
         raise typer.Exit()
@@ -74,6 +82,7 @@ def main_callback(
         is_eager=True,
     ),
 ) -> None:
+    """Configure the root command and its eager version option."""
     pass
 
 
@@ -115,6 +124,19 @@ def add(
         help="Install to ~/.agents/skills/ regardless of git context.",
     ),
 ) -> None:
+    """Install selected skills from a Git repository.
+
+    Args:
+        ctx: Typer command context used by the add workflow.
+        url: Repository URL containing one or more skill directories.
+        all_: Install every valid skill found in the repository.
+        skills: Optional space-separated names to install.
+        path: Optional repository-relative skills container path.
+        yes: Replace conflicts without prompting.
+        dry_run: Preview changes without writing files.
+        ignore_validation: Install skills despite validation issues.
+        global_: Install into the global agent directory.
+    """
     run_add(
         ctx=ctx,
         url=url,
@@ -147,6 +169,13 @@ def update(
         help="Update skills in the global install instead of the current project.",
     ),
 ) -> None:
+    """Update installed skills from their recorded source repositories.
+
+    Args:
+        skills: Optional installed skill names. An omitted value updates all.
+        dry_run: Preview updates without changing the runtime or lockfile.
+        global_: Update the global installation instead of the current project.
+    """
     context = resolve_install_context(global_)
     try:
         ensure_active_environment_runtime_is_clean(context)
@@ -191,6 +220,7 @@ def list_skills(
         help="List skills from the global install instead of the current project.",
     ),
 ) -> None:
+    """List installed skills in human-readable or JSON form."""
     _render_skill_list(json_=json_, global_=global_)
 
 
@@ -199,6 +229,7 @@ def info(
     skill_name: str = typer.Argument(..., help="Installed skill name to inspect."),
     global_: bool = typer.Option(False, "--global", "-g", help="Look up the skill in the global install."),
 ) -> None:
+    """Show lockfile metadata and the installed skill document."""
     context = resolve_install_context(global_)
     lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
     entry = lockfile.skills.get(skill_name)
@@ -250,6 +281,7 @@ def remove(
         help="Remove skills from the global install instead of the current project.",
     ),
 ) -> None:
+    """Remove selected or all installed skills."""
     requested_skills = skills or []
     if all_ and requested_skills:
         console.print(make_panel("err", "Invalid Arguments", ["Use either skill names or --all, not both."]))
@@ -321,6 +353,13 @@ def init(
         help="Create the scaffold in ~/.agents/skills/ regardless of git context.",
     ),
 ) -> None:
+    """Create a new skill scaffold in the selected installation context.
+
+    Args:
+        skill_name: Directory-safe name for the new skill.
+        full: Also create ``scripts``, ``references``, and ``assets`` folders.
+        global_: Create the scaffold in the global agent directory.
+    """
     validation_issue = _validate_init_name(skill_name)
     if validation_issue is not None:
         print_validation_issue(validation_issue)
@@ -364,6 +403,7 @@ def init(
 
 
 def main() -> None:
+    """Run the Typer application."""
     app()
 
 
@@ -376,6 +416,7 @@ def list_envs(
         help="List globally stored environments instead of project-scoped ones.",
     ),
 ) -> None:
+    """List environments in the selected scope."""
     context = resolve_install_context(False)
     records = list_environments(context, scope="global" if global_ else None)
 
@@ -416,6 +457,7 @@ def create(
         help="Store the environment globally in ~/.trivium so it can be activated from any project.",
     ),
 ) -> None:
+    """Create an environment from the current runtime or as an empty snapshot."""
     context = resolve_install_context(False)
     try:
         record = create_environment(context, name=name, empty=empty, shared=shared, scope="global" if global_ else None)
@@ -442,6 +484,7 @@ def activate(
         help="Activate into the global runtime (~/.agents/skills) instead of the current project runtime.",
     ),
 ) -> None:
+    """Activate a named environment in the selected runtime."""
     context = resolve_install_context(global_)
     try:
         activate_environment(context, name)
@@ -461,6 +504,7 @@ def deactivate(
         help="Deactivate the global runtime environment instead of the current project runtime.",
     ),
 ) -> None:
+    """Deactivate the selected runtime environment."""
     context = resolve_install_context(global_)
     try:
         was_active = deactivate_environment(context)
@@ -485,6 +529,7 @@ def remove_env(
         help="Remove the globally stored environment instead of the project-scoped one.",
     ),
 ) -> None:
+    """Remove a named environment from the selected scope."""
     context = resolve_install_context(False)
     try:
         was_active, removed_local, removed_shared = remove_environment(
@@ -518,6 +563,7 @@ def info_env(
         help="Inspect a globally stored environment instead of a project-scoped one.",
     ),
 ) -> None:
+    """Show details for a named or active environment."""
     context = resolve_install_context(False)
     details = describe_environment(context, name, scope="global" if global_ else None)
     if details is None:

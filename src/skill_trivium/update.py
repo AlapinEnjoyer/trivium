@@ -1,3 +1,10 @@
+"""Implement concurrent refreshes of skills recorded in a lockfile.
+
+Sources are grouped so each repository is cloned once, then validation,
+content comparison, installation, lockfile updates, and active-environment
+synchronization are applied according to the requested or dry-run mode.
+"""
+
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -32,6 +39,7 @@ from skill_trivium.ui import console, make_panel, print_validation_issue, progre
 
 @dataclass(slots=True)
 class UpdateOutcome:
+    """Collect update changes, warnings, and the resulting CLI status."""
     updated_names: list[str] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
     auth_failure: bool = False
@@ -41,6 +49,7 @@ class UpdateOutcome:
     runtime_changed: bool = False
 
     def exit_code(self, *, dry_run: bool) -> int | None:
+        """Return the CLI exit code implied by this outcome."""
         if self.auth_failure:
             return 5
         if self.validation_issues:
@@ -59,6 +68,25 @@ def run_update(
     requested_skills: list[str],
     dry_run: bool,
 ) -> UpdateOutcome:
+    """Refresh requested lockfile entries from their source repositories.
+
+    Entries are grouped by source so each repository is cloned once. Changed
+    skills are revalidated and installed unless this is a dry run; refreshed
+    revisions and runtime changes are reflected in the returned outcome.
+
+    Args:
+        lockfile: Current lockfile whose entries should be considered.
+        context: Installation context containing the runtime and destination.
+        requested_skills: Names to update, or an empty list for all entries.
+        dry_run: Whether to report changes without writing files.
+
+    Returns:
+        An outcome containing updated names, warnings, errors, and change flags.
+
+    Raises:
+        EnvironmentError: If an active environment runtime is not clean enough
+            to update safely.
+    """
     ensure_active_environment_runtime_is_clean(context)
     target_entries = {name: lockfile.skills[name] for name in (requested_skills or sorted(lockfile.skills))}
     grouped_entries: dict[str, list[SkillLockEntry]] = defaultdict(list)
@@ -81,7 +109,6 @@ def run_update(
                 _apply_update_result(
                     lockfile=lockfile,
                     result=result,
-                    source_url=source_url,
                     dry_run=dry_run,
                     outcome=outcome,
                 )
@@ -96,6 +123,7 @@ def run_update(
 
 
 def render_update_summary(outcome: UpdateOutcome, *, dry_run: bool) -> None:
+    """Render the user-facing summary for an update operation."""
     if dry_run and outcome.updated_names:
         console.print(
             make_panel(
@@ -129,7 +157,6 @@ def _apply_update_result(
     *,
     lockfile: LockfileData,
     result: SourceUpdateResult,
-    source_url: str,
     dry_run: bool,
     outcome: UpdateOutcome,
 ) -> None:
