@@ -8,6 +8,8 @@ switching snapshots.
 
 import shutil
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -241,8 +243,8 @@ def create_environment(
             runtime cannot be safely captured.
     """
     _validate_or_raise(name)
-    with installation_lock(context):
-        env_scope = scope or context.mode
+    env_scope = scope or context.mode
+    with _environment_mutation_lock(context, scope=env_scope):
         paths = environment_paths(context, scope=env_scope)
         if shared and paths.shared_envs_dir is None:
             raise EnvironmentError(
@@ -389,8 +391,8 @@ def remove_environment(
 ) -> tuple[bool, bool, bool]:
     """Remove an environment and report active, local, and shared state."""
     _validate_or_raise(name)
-    with installation_lock(context):
-        env_scope = scope or context.mode
+    env_scope = scope or context.mode
+    with _environment_mutation_lock(context, scope=env_scope):
         paths = environment_paths(context, scope=env_scope)
         local_path = paths.env_dir(name)
         shared_path = _shared_environment_path(paths, name)
@@ -558,6 +560,19 @@ def environment_paths(context: InstallContext, *, scope: EnvironmentScope) -> En
     )
 
 
+@contextmanager
+def _environment_mutation_lock(context: InstallContext, *, scope: EnvironmentScope) -> Iterator[None]:
+    with installation_lock(context):
+        if scope != "global" or context.mode == "global":
+            yield
+            return
+
+        # Cross-scope operations always acquire the project lock before the
+        # global lock so separate projects contend on the same storage owner.
+        with installation_lock(resolve_install_context(True)):
+            yield
+
+
 def _build_environment_record(paths: EnvironmentPaths, name: str, *, active: bool) -> EnvironmentRecord:
     lockfile = _load_preferred_environment_lockfile(paths, name)
     return EnvironmentRecord(
@@ -583,16 +598,13 @@ def _ensure_environment_available(context: InstallContext, name: str) -> None:
         return
 
     if context.mode == "project":
-        global_paths = environment_paths(context, scope="global")
-        if global_paths.env_dir(name).is_dir():
-            _copy_directory(global_paths.env_dir(name), runtime_paths.env_dir(name))
-            return
-    else:
-        global_paths = runtime_paths
+        with installation_lock(resolve_install_context(True)):
+            global_paths = environment_paths(context, scope="global")
+            if global_paths.env_dir(name).is_dir():
+                _copy_directory(global_paths.env_dir(name), runtime_paths.env_dir(name))
+                return
 
     shared_path = _shared_environment_path(runtime_paths, name)
-    if shared_path is None and context.mode == "project":
-        shared_path = _shared_environment_path(global_paths, name)
     if shared_path is None:
         raise EnvironmentError(
             title="Environment Not Found",

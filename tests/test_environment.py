@@ -195,6 +195,62 @@ def test_create_environment_reloads_conflicts_after_acquiring_lock(
     assert exc_info.value.title == "Environment Exists"
 
 
+def test_global_environment_creation_uses_same_global_lock_across_projects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serialize global environment writes from different project contexts."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    first_context = make_context(tmp_path)
+    second_project = tmp_path / "second-project"
+    second_context = InstallContext(
+        mode="project",
+        base_dir=second_project,
+        skills_dir=second_project / ".agents" / "skills",
+        lockfile_path=second_project / "skills.lock",
+        install_prefix=Path(".agents/skills"),
+    )
+    locked_paths: list[Path] = []
+
+    @contextmanager
+    def record_lock(locked_context: InstallContext) -> Iterator[None]:
+        locked_paths.append(locked_context.lockfile_path)
+        yield
+
+    monkeypatch.setattr(environment_module, "installation_lock", record_lock)
+
+    create_environment(first_context, name="office", empty=True, shared=False, scope="global")
+    create_environment(second_context, name="studio", empty=True, shared=False, scope="global")
+
+    global_lockfile = tmp_path / "home" / ".agents" / "skills.lock"
+    assert locked_paths == [first_context.lockfile_path, global_lockfile, second_context.lockfile_path, global_lockfile]
+
+
+def test_project_activation_reloads_global_fallback_after_acquiring_global_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a global fallback removed while a project waits for its lock."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path)
+    global_environment_dir = environment_paths(context, scope="global").env_dir("office")
+    global_environment_dir.mkdir(parents=True)
+
+    @contextmanager
+    def remove_while_locking(locked_context: InstallContext) -> Iterator[None]:
+        assert locked_context.lockfile_path == tmp_path / "home" / ".agents" / "skills.lock"
+        global_environment_dir.rmdir()
+        yield
+
+    monkeypatch.setattr(environment_module, "installation_lock", remove_while_locking)
+
+    with pytest.raises(EnvironmentError) as exc_info:
+        environment_module._ensure_environment_available(context, "office")
+
+    assert exc_info.value.title == "Environment Not Found"
+    assert not environment_paths(context, scope="project").env_dir("office").exists()
+
+
 def test_restore_snapshot_validates_lockfile_before_replacing_runtime(tmp_path: Path) -> None:
     """Keep the current runtime when a replacement snapshot is malformed."""
     context = make_context(tmp_path)
