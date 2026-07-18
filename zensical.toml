@@ -1,0 +1,99 @@
+[project]
+site_name = "trivium"
+site_description = "A CLI for installing, updating, and managing AI agent skills that follow the Agent Skills Specification."
+site_author = "AlapinEnjoyer"
+site_url = "https://alapinenjoyer.github.io/trivium/"
+
+copyright = """
+Copyright &copy; 2026 AlapinEnjoyer
+"""
+
+nav = [
+  { "Home" = "index.md" },
+  { "Installation" = "installation.md" },
+  { "Usage" = "usage.md" },
+  { "Environments" = "environments.md" },
+  { "Reference" = "reference.md" },
+]
+
+extra_css = ["stylesheets/site.css"]
+
+[project.theme]
+variant = "modern"
+custom_dir = "docs/.overrides"
+features = [
+  "content.tabs.link",
+  "navigation.top",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tracking",
+  "header.autohide",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "search.highlight",
+  "announce.dismiss",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+
+[project.theme.palette.toggle]
+icon = "lucide/sun-moon"
+name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+
+[project.theme.palette.toggle]
+icon = "lucide/sun"
+name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+
+[project.theme.palette.toggle]
+icon = "lucide/moon"
+name = "Switch to system preference"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/AlapinEnjoyer/trivium"
+
+[project.markdown_extensions]
+md_in_html = {}
+attr_list = {}
+admonition = {}
+def_list = {}
+abbr = {}
+toc = { permalink = true }
+
+[project.markdown_extensions.pymdownx]
+caret = {}
+keys = {}
+mark = {}
+tilde = {}
+details = {}
+superfences = { custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" }
+]}
+
+[project.markdown_extensions.pymdownx.tasklist]
+custom_checkbox = true
+clickable_checkbox = true
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+
+[project.markdown_extensions.pymdownx.arithmatex]
+generic = true
+
+[project.markdown_extensions.pymdownx.emoji]
+emoji_index = "zensical.extensions.emoji.twemoji"
+emoji_generator = "zensical.extensions.emoji.to_svg"

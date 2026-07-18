@@ -51,7 +51,6 @@ HELP_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 ADD_CONTEXT_SETTINGS = {**HELP_CONTEXT_SETTINGS, "allow_extra_args": True}
 
 app = typer.Typer(
-    add_completion=False,
     context_settings=HELP_CONTEXT_SETTINGS,
     no_args_is_help=True,
 )

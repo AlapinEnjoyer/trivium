@@ -30,6 +30,7 @@ trv = "skill_trivium.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=9.0.1,<10.0.0",
+    "zensical>=0.0.51,<0.0.52",
 ]
 
 [tool.ruff]
