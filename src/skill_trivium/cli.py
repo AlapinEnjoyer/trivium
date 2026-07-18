@@ -55,7 +55,11 @@ app = typer.Typer(
     context_settings=HELP_CONTEXT_SETTINGS,
     no_args_is_help=True,
 )
-env_app = typer.Typer(context_settings=HELP_CONTEXT_SETTINGS, no_args_is_help=True)
+env_app = typer.Typer(
+    help="Manage named skill environments.",
+    context_settings=HELP_CONTEXT_SETTINGS,
+    no_args_is_help=True,
+)
 app.add_typer(env_app, name="env")
 
 
