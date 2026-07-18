@@ -101,47 +101,28 @@ def run_add(
     is_interactive_terminal: Callable[[], bool],
     select_conflict: Callable[[str], str | None],
 ) -> None:
-    """Install selected skills from a remote repository.
-
-    The workflow clones the source, resolves the skills container, validates
-    candidates, resolves conflicts, installs selected trees, and updates the
-    lockfile. Non-dry-run operations are serialized with the installation lock.
-
-    Args:
-        ctx: Typer context used for command-level argument handling.
-        url: Git repository URL containing skill definitions.
-        all_: Whether to install every discovered skill.
-        skills: Optional comma-separated selection of skill names.
-        path: Optional repository-relative skills container path.
-        yes: Whether to replace conflicts without prompting.
-        dry_run: Whether to preview changes without writing them.
-        ignore_validation: Whether to install skills with validation issues.
-        global_: Whether to install into the global skill directory.
-        progress_factory: Factory for the progress display implementation.
-        is_interactive_terminal: Function reporting terminal interactivity.
-        select_conflict: Function used to resolve interactive conflicts.
-
-    Raises:
-        typer.Exit: If repository access, validation, selection, or conflict
-            handling requires a command failure exit code.
-    """
+    """Install selected skills from a remote repository."""
     context = resolve_install_context(global_)
     lock_context = nullcontext() if dry_run else installation_lock(context)
-    with lock_context:
-        _run_add(
-            ctx=ctx,
-            url=url,
-            all_=all_,
-            skills=skills,
-            path=path,
-            yes=yes,
-            dry_run=dry_run,
-            ignore_validation=ignore_validation,
-            context=context,
-            progress_factory=progress_factory,
-            is_interactive_terminal=is_interactive_terminal,
-            select_conflict=select_conflict,
-        )
+    try:
+        with lock_context:
+            _run_add(
+                ctx=ctx,
+                url=url,
+                all_=all_,
+                skills=skills,
+                path=path,
+                yes=yes,
+                dry_run=dry_run,
+                ignore_validation=ignore_validation,
+                context=context,
+                progress_factory=progress_factory,
+                is_interactive_terminal=is_interactive_terminal,
+                select_conflict=select_conflict,
+            )
+    except OSError as error:
+        console.print(make_panel("err", "Add Failed", [str(error)]))
+        raise typer.Exit(code=1) from error
 
 
 def _run_add(
@@ -159,32 +140,7 @@ def _run_add(
     is_interactive_terminal: Callable[[], bool],
     select_conflict: Callable[[str], str | None],
 ) -> None:
-    """Execute the 'trv add' workflow for installing skills from a remote repository.
-
-    Handles cloning the repository, selecting and validating skills, resolving conflicts,
-    and updating the lockfile. Supports dry runs, interactive and non-interactive modes,
-    and dependency injection for progress reporting and conflict resolution.
-
-    Args:
-        ctx (typer.Context): Typer context for CLI argument parsing.
-        url (str): URL of the remote repository to clone.
-        all_ (bool): Whether to add all available skills.
-        skills (str | None): Comma-separated skill names to add, or None.
-        path (str | None): Optional subdirectory path to search for skills.
-        yes (bool): Whether to automatically resolve conflicts by replacing existing skills.
-        dry_run (bool): If True, simulates the add operation without making changes.
-        ignore_validation (bool): If True, install skills even if they have validation issues.
-        global_ (bool): Whether to install skills globally.
-        progress_factory (Callable[[], ProgressLike]): Factory for creating a progress indicator.
-        is_interactive_terminal (Callable[[], bool]): Function to check if terminal is interactive.
-        select_conflict (Callable[[str], str | None]): Function to resolve skill conflicts.
-
-    Returns:
-        None
-
-    Raises:
-        typer.Exit: If an error occurs or user input is invalid.
-    """
+    """Execute the 'trv add' workflow for installing skills from a remote repository."""
     requested_names = _parse_add_skill_names(ctx, all_, skills)
     try:
         ensure_active_environment_runtime_is_clean(context)
@@ -274,10 +230,6 @@ def _run_add(
                         would_install=install_outcome.would_install,
                     )
 
-                    runtime_changed = bool(resolution.pending_installs)
-                    if runtime_changed and not dry_run:
-                        sync_active_environment(context)
-
                     if replaced and not dry_run:
                         console.print(
                             make_panel(
@@ -313,14 +265,7 @@ def _run_add(
 
 
 def _parse_add_skill_names(ctx: typer.Context, all_: bool, skills_value: str | None) -> list[str] | None:
-    """Parse and validate skill name arguments for the add command.
-
-    If neither --all nor --skills is provided, defaults to --all.
-    Ensures that --all and --skills are not both used, and that
-    the correct number and type of arguments are provided. Returns a list
-    of requested skill names, or None if --all is used. Exits with an error
-    and prints a message if arguments are invalid.
-    """
+    """Parse and validate skill name arguments for the add command."""
     extra_args = list(dict.fromkeys(ctx.args))
     if all_ and skills_value is not None:
         console.print(make_panel("err", "Invalid Arguments", ["Use either --all or --skills, not both."]))
@@ -342,22 +287,7 @@ def _parse_add_skill_names(ctx: typer.Context, all_: bool, skills_value: str | N
 
 
 def _resolve_skills_container(repo_path: Path, path: str | None) -> tuple[Path, str]:
-    """Resolve the skills container directory within a cloned repository.
-
-    Attempts to locate the directory containing skill definitions (with SKILL.md files)
-    based on the provided repository path and optional subdirectory path. If the directory
-    cannot be found or is invalid, prints an error panel and exits the program.
-
-    Args:
-        repo_path (Path): The root path of the cloned repository.
-        path (str | None): Optional subdirectory path to search for skills.
-
-    Returns:
-        tuple[Path, str]: The resolved skills container path and its string representation.
-
-    Raises:
-        typer.Exit: If the skills container cannot be found or the path is invalid.
-    """
+    """Resolve the skills container directory within a cloned repository."""
     resolved = discover_skills_path(repo_path, path)
     if resolved is not None:
         return resolved
@@ -385,21 +315,7 @@ def _select_target_skill_directories(
     validation_issues: list[ValidationIssue],
     failed: list[str],
 ) -> list[Path]:
-    """Select and validate target skill directories from the skills container.
-
-    If specific skill names are requested, checks for their existence in the skills container.
-    Records validation issues and failed names for any missing skills. If no names are requested,
-    returns all candidate skill directories.
-
-    Args:
-        skills_container (Path): Path to the directory containing available skills.
-        requested_names (list[str] | None): List of skill names to select, or None to select all.
-        validation_issues (list[ValidationIssue]): List to append validation issues for missing skills.
-        failed (list[str]): List to append names of skills that were not found.
-
-    Returns:
-        list[Path]: List of Paths to the selected skill directories.
-    """
+    """Select and validate target skill directories from the skills container."""
     candidates = enumerate_skill_directories(skills_container)
     if requested_names is None:
         return candidates
@@ -425,21 +341,11 @@ def _validate_target_skills(
     failed: list[str],
     ignore_validation: bool = False,
 ) -> list[ParsedSkill]:
-    """Validate target skill directories and parse them into ParsedSkill objects.
-
-    Args:
-        target_directories (list[Path]): List of skill directories to validate.
-        validation_issues (list[ValidationIssue]): List to append validation issues for invalid skills.
-        failed (list[str]): List to append names of skills that failed validation.
-        ignore_validation (bool): If True, install skills even if they have validation issues.
-
-    Returns:
-        list[ParsedSkill]: List of successfully parsed skills.
-    """
+    """Validate target skill directories and parse them into ParsedSkill objects."""
     parsed_skills: list[ParsedSkill] = []
     for skill_dir in target_directories:
         parsed_skill, issues = validate_skill_directory(skill_dir, ignore_validation=ignore_validation)
-        if issues and not ignore_validation:
+        if issues and (not ignore_validation or parsed_skill is None):
             validation_issues.extend(issues)
             for issue in issues:
                 print_validation_issue(issue)
@@ -458,18 +364,7 @@ def _classify_add_candidates(
     context: InstallContext,
     skipped: dict[str, str],
 ) -> AddResolution:
-    """Classify parsed skills into pending installs, conflicts, and skipped categories.
-
-    Args:
-        parsed_skills (list[ParsedSkill]): List of parsed skills to classify.
-        lockfile (LockfileData): Current lockfile data.
-        source_url (str): Source URL of the incoming skills.
-        context (InstallContext): Installation context.
-        skipped (dict[str, str]): Dictionary to append names and reasons for skipped skills.
-
-    Returns:
-        AddResolution: Resolution object containing classified skills.
-    """
+    """Classify parsed skills into pending installs, conflicts, and skipped categories."""
     resolution = AddResolution()
     candidate_names: set[str] = set()
     for parsed_skill in parsed_skills:
@@ -489,7 +384,7 @@ def _classify_add_candidates(
 
         existing = lockfile.skills.get(parsed_skill.name)
         if existing is None:
-            if destination.exists():
+            if destination.exists() or destination.is_symlink():
                 resolution.untracked.append(parsed_skill)
             else:
                 resolution.pending_installs.append(parsed_skill)
@@ -510,19 +405,7 @@ def _resolve_conflicts(
     incoming_commit_hash: str,
     skipped: dict[str, str],
 ) -> list[str]:
-    """Resolve conflicts between incoming skills and existing skills in the lockfile.
-
-    Args:
-        resolution (AddResolution): Resolution object containing classified skills.
-        yes (bool): Whether to automatically resolve conflicts by replacing existing skills.
-        select_conflict (Callable[[str], str | None]): Function to select conflict resolution for a skill.
-        incoming_source_url (str): Source URL of the incoming skills.
-        incoming_commit_hash (str): Commit hash of the incoming skills.
-        skipped (dict[str, str]): Dictionary to append names and reasons for skipped skills.
-
-    Returns:
-        list[str]: List of names of skills that were replaced.
-    """
+    """Resolve conflicts between incoming skills and existing skills in the lockfile."""
     replaced: list[str] = []
     if yes:
         for parsed_skill, _existing in resolution.conflicts:
@@ -586,6 +469,7 @@ def _apply_pending_installs(
             installed.append(parsed_skill.name)
 
         write_lockfile(context, lockfile)
+        sync_active_environment(context)
         mutation.commit()
 
 

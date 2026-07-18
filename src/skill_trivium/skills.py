@@ -1,16 +1,10 @@
-"""Parse and manage the ``SKILL.md`` directories installed by Trivium.
-
-The module discovers repository layouts, validates YAML frontmatter and
-directory names, normalizes compatible metadata, computes reproducible
-content hashes, and copies validated trees into an installation context.
-"""
+"""Parse and manage the ``SKILL.md`` directories installed by Trivium."""
 
 import re
 import shutil
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import yaml
 
@@ -26,21 +20,9 @@ def utc_now() -> str:
 
 
 def discover_skills_path(repo_root: Path, explicit_path: str | None) -> tuple[Path, str] | None:
-    """Resolve the skills container directory within a cloned repository.
-
-    The explicit path is tried first. Without one, the conventional ``skills``
-    directory is preferred, followed by the repository root itself.
-
-    Args:
-        repo_root: Root path of the cloned repository.
-        explicit_path: Optional repository-relative subdirectory to search.
-
-    Returns:
-        The resolved container path and its repository-relative representation,
-        or ``None`` when no valid container contains skill directories.
-    """
+    """Resolve the skills container directory within a cloned repository."""
     if explicit_path is not None:
-        candidate = _resolve_repo_path(repo_root, explicit_path)
+        candidate = resolve_repo_path(repo_root, explicit_path)
         if candidate is None or not candidate.is_dir():
             return None
         if not enumerate_skill_directories(candidate):
@@ -48,6 +30,8 @@ def discover_skills_path(repo_root: Path, explicit_path: str | None) -> tuple[Pa
         return candidate, relative_repo_path(repo_root, candidate)
 
     skills_dir = repo_root / "skills"
+    if skills_dir.is_symlink():
+        return None
     if skills_dir.is_dir():
         if enumerate_skill_directories(skills_dir):
             return skills_dir, "skills"
@@ -59,48 +43,28 @@ def discover_skills_path(repo_root: Path, explicit_path: str | None) -> tuple[Pa
 
 
 def enumerate_skill_directories(container_dir: Path) -> list[Path]:
-    """Return sorted child directories containing a ``SKILL.md`` file.
-
-    Args:
-        container_dir: Directory whose immediate children should be inspected.
-
-    Returns:
-        Skill directories ordered by directory name. Missing or non-directory
-        containers produce an empty list.
-    """
-    if not container_dir.exists() or not container_dir.is_dir():
+    """Return sorted child directories containing a ``SKILL.md`` file."""
+    if container_dir.is_symlink() or not container_dir.exists() or not container_dir.is_dir():
         return []
 
     candidates = [
         child
         for child in sorted(container_dir.iterdir(), key=lambda item: item.name)
-        if child.is_dir() and (child / "SKILL.md").is_file()
+        if not child.is_symlink() and child.is_dir() and (child / "SKILL.md").is_file()
     ]
     return candidates
 
 
 def parse_skill_document(skill_file: Path) -> tuple[dict[str, object], str]:
-    """Parse YAML frontmatter and the markdown body from a skill document.
-
-    Args:
-        skill_file: Path to a document beginning with a ``---`` frontmatter
-            delimiter.
-
-    Returns:
-        A normalized frontmatter mapping and the markdown body without the
-        separator's leading blank lines.
-
-    Raises:
-        ValueError: If delimiters, YAML, or the frontmatter mapping are invalid.
-    """
+    """Parse YAML frontmatter and the markdown body from a skill document."""
     raw_content = skill_file.read_text(encoding="utf-8")
     lines = raw_content.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
+    if not lines or lines[0].rstrip("\r\n") != "---":
         raise ValueError("SKILL.md must start with YAML frontmatter delimited by '---'.")
 
     closing_index: int | None = None
     for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
+        if lines[index].rstrip("\r\n") == "---":
             closing_index = index
             break
 
@@ -111,15 +75,16 @@ def parse_skill_document(skill_file: Path) -> tuple[dict[str, object], str]:
     body = "".join(lines[closing_index + 1 :]).lstrip("\r\n")
 
     try:
-        loaded = yaml.safe_load(frontmatter_text) or {}
+        loaded = yaml.safe_load(frontmatter_text)
     except yaml.YAMLError as error:
         raise ValueError(f"Invalid YAML frontmatter: {error}") from error
 
-    if not isinstance(loaded, dict):
+    if loaded is None:
+        loaded = {}
+    if not isinstance(loaded, dict) or not all(isinstance(key, str) for key in loaded):
         raise ValueError("SKILL.md frontmatter must be a YAML mapping.")
 
-    normalized = {str(key): value for key, value in loaded.items()}
-    return normalized, body
+    return loaded, body
 
 
 def render_skill_document(frontmatter: dict[str, object], body: str) -> str:
@@ -130,57 +95,21 @@ def render_skill_document(frontmatter: dict[str, object], body: str) -> str:
 
 
 def write_skill_document(skill_file: Path, frontmatter: dict[str, object], body: str) -> None:
-    """Render and write a normalized skill document.
-
-    Args:
-        skill_file: Destination ``SKILL.md`` path.
-        frontmatter: YAML-compatible frontmatter mapping.
-        body: Markdown content following the frontmatter.
-    """
-    rendered = render_skill_document(frontmatter, body)
-    temporary_path: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=skill_file.parent,
-            prefix=f".{skill_file.name}.",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            temporary_file.write(rendered)
-        shutil.copymode(skill_file, temporary_path)
-        temporary_path.replace(skill_file)
-    finally:
-        if temporary_path is not None and temporary_path.exists():
-            temporary_path.unlink()
+    """Render and write a normalized skill document."""
+    skill_file.write_text(render_skill_document(frontmatter, body), encoding="utf-8")
 
 
 def hash_skill_directory(skill_dir: Path, *, skill_document: str | None = None) -> str:
-    """Hash all files in a skill directory using stable relative paths.
-
-    Args:
-        skill_dir: Directory whose files should be included.
-        skill_document: Optional rendered content to use instead of the on-disk
-            ``SKILL.md`` content.
-
-    Returns:
-        A hexadecimal SHA-256 digest covering relative paths and file content.
-    """
+    """Hash regular file paths and contents deterministically."""
     digest = sha256()
-    for path in sorted(skill_dir.rglob("*"), key=lambda item: item.relative_to(skill_dir).as_posix()):
-        if path.is_dir():
-            continue
-
+    for path in _safe_skill_files(skill_dir):
         relative_path = path.relative_to(skill_dir).as_posix()
-        digest.update(relative_path.encode("utf-8"))
+        digest.update(relative_path.encode())
         digest.update(b"\0")
-        if relative_path == "SKILL.md" and skill_document is not None:
-            digest.update(skill_document.encode("utf-8"))
-        else:
-            digest.update(path.read_bytes())
+        digest.update(
+            skill_document.encode() if relative_path == "SKILL.md" and skill_document is not None else path.read_bytes()
+        )
         digest.update(b"\0")
-
     return digest.hexdigest()
 
 
@@ -193,54 +122,14 @@ def hash_parsed_skill(parsed_skill: ParsedSkill) -> str:
 
 
 def install_skill_tree(parsed_skill: ParsedSkill, destination: Path) -> None:
-    """Replace a destination with an installed, normalized skill tree.
-
-    Args:
-        parsed_skill: Validated skill whose source tree and normalized document
-            should be copied.
-        destination: Installation directory to replace.
-
-    Raises:
-        OSError: If the existing tree cannot be removed or the new tree cannot
-            be copied or written.
-    """
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(
-        prefix=f".{destination.name}.",
-        dir=destination.parent,
-        ignore_cleanup_errors=True,
-    ) as temp_dir_name:
-        temp_dir = Path(temp_dir_name)
-        staged_skill = temp_dir / "skill"
-        previous_skill = temp_dir / "previous"
-        shutil.copytree(parsed_skill.directory, staged_skill)
-        write_skill_document(staged_skill / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
-
-        if destination.exists():
-            destination.replace(previous_skill)
-        try:
-            staged_skill.replace(destination)
-        except OSError:
-            if destination.exists():
-                shutil.rmtree(destination)
-            if previous_skill.exists():
-                previous_skill.replace(destination)
-            raise
-
-
-def rewrite_normalized_skill_document_if_needed(parsed_skill: ParsedSkill, destination: Path) -> bool:
-    """Rewrite installed SKILL.md when normalization changed the source frontmatter.
-
-    This is intentionally narrower than a generic "repair" operation. It only
-    rewrites the installed document when validation produced compatibility
-    warnings that also changed the normalized frontmatter we want on disk.
-    """
-    if not parsed_skill.warnings:
-        return False
-    if not destination.is_dir():
-        return False
+    """Replace a destination with an installed, normalized skill tree."""
+    _safe_skill_files(parsed_skill.directory)
+    if destination.is_symlink() or destination.is_file():
+        destination.unlink()
+    elif destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(parsed_skill.directory, destination)
     write_skill_document(destination / "SKILL.md", parsed_skill.frontmatter, parsed_skill.body)
-    return True
 
 
 def build_lock_entry(
@@ -272,20 +161,16 @@ def build_lock_entry(
 def validate_skill_directory(
     skill_dir: Path, *, ignore_validation: bool = False
 ) -> tuple[ParsedSkill | None, list[ValidationIssue]]:
-    """Validate a skill directory and return normalized data and issues.
-
-    Args:
-        skill_dir: Directory expected to contain ``SKILL.md``.
-        ignore_validation: Whether to return normalized data even when issues
-            were found.
-
-    Returns:
-        A parsed skill when processing can continue, together with all
-        validation issues discovered in the directory.
-    """
+    """Validate a skill directory and return normalized data and issues."""
     issues: list[ValidationIssue] = []
     skill_name = skill_dir.name
     skill_file = skill_dir / "SKILL.md"
+
+    try:
+        _safe_skill_files(skill_dir)
+    except OSError as error:
+        issues.append(ValidationIssue(skill_name=skill_name, field="tree", rule=str(error)))
+        return None, issues
 
     if not skill_file.is_file():
         issues.append(
@@ -312,7 +197,13 @@ def validate_skill_directory(
     normalized_frontmatter = dict(frontmatter)
 
     name = frontmatter.get("name")
-    issues.extend(validate_skill_name(name, skill_name=skill_name, expected_directory=skill_dir.name))
+    name_issues = validate_skill_name(name, skill_name=skill_name, expected_directory=skill_dir.name)
+    issues.extend(name_issues)
+    if name_issues:
+        return None, issues
+    if not isinstance(name, str):
+        raise AssertionError("Validated skill names must be strings.")
+    normalized_name = name.strip()
 
     description = frontmatter.get("description")
     if not isinstance(description, str):
@@ -432,7 +323,7 @@ def validate_skill_directory(
     if issues and not ignore_validation:
         return None, issues
 
-    normalized_frontmatter["name"] = str(name).strip()
+    normalized_frontmatter["name"] = normalized_name
     if license_value is not None:
         normalized_frontmatter["license"] = license_value
     if compatibility is not None:
@@ -445,7 +336,7 @@ def validate_skill_directory(
     return (
         ParsedSkill(
             directory=skill_dir,
-            name=str(name).strip(),
+            name=normalized_name,
             description=str(description).strip() if isinstance(description, str) else "",
             license=license_value,
             compatibility=compatibility,
@@ -465,16 +356,7 @@ def validate_skill_name(
     skill_name: str,
     expected_directory: str | None = None,
 ) -> list[ValidationIssue]:
-    """Validate a skill name and optional directory-name consistency.
-
-    Args:
-        value: Value supplied by skill frontmatter.
-        skill_name: Name used when reporting validation issues.
-        expected_directory: Directory name that the value must match when set.
-
-    Returns:
-        Validation issues, or an empty list when the name is valid.
-    """
+    """Validate a skill name and optional directory-name consistency."""
     issues: list[ValidationIssue] = []
     if not isinstance(value, str):
         issues.append(
@@ -517,19 +399,6 @@ def validate_skill_name(
     return issues
 
 
-def build_skill_markdown(skill_name: str) -> str:
-    """Build the starter markdown document for a new skill."""
-    return (
-        f"---\n"
-        f"name: {skill_name}\n"
-        "description: |\n"
-        "  Describe what this skill does and when an agent should use it.\n"
-        "---\n\n"
-        "## Instructions\n\n"
-        "<!-- Add step-by-step instructions here -->\n"
-    )
-
-
 def relative_repo_path(repo_root: Path, target: Path) -> str:
     """Return a target path relative to a repository root."""
     relative = target.resolve().relative_to(repo_root.resolve())
@@ -537,14 +406,35 @@ def relative_repo_path(repo_root: Path, target: Path) -> str:
     return relative_text or "."
 
 
-def _resolve_repo_path(repo_root: Path, explicit_path: str) -> Path | None:
+def resolve_repo_path(repo_root: Path, explicit_path: str) -> Path | None:
+    """Resolve a relative repository path without following symlink components."""
     raw_path = Path(explicit_path)
-    candidate = (repo_root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+    if raw_path.is_absolute() or ".." in raw_path.parts:
+        return None
+    root = repo_root.resolve()
+    current = root
     try:
-        candidate.relative_to(repo_root.resolve())
-    except ValueError:
+        for part in raw_path.parts:
+            current /= part
+            if current.is_symlink():
+                return None
+        candidate = current.resolve()
+        candidate.relative_to(root)
+    except (OSError, ValueError):
         return None
     return candidate
+
+
+def _safe_skill_files(skill_dir: Path) -> list[Path]:
+    if skill_dir.is_symlink() or not skill_dir.is_dir():
+        raise OSError(f"Unsafe skill tree '{skill_dir}': expected a real directory.")
+    files: list[Path] = []
+    for path in sorted(skill_dir.rglob("*"), key=lambda item: item.relative_to(skill_dir).as_posix()):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise OSError(f"Unsafe skill tree entry '{path}': only regular files and directories are allowed.")
+        if path.is_file():
+            files.append(path)
+    return files
 
 
 def _validate_optional_string(

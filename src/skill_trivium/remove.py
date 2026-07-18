@@ -18,22 +18,7 @@ class RemoveOutcome:
 
 
 def run_remove(context: InstallContext, skill_names: list[str]) -> RemoveOutcome:
-    """Remove installed skills and synchronize the active environment.
-
-    The lockfile is reloaded after acquiring the installation lock so callers
-    cannot mutate using state that changed while confirmation was displayed.
-
-    Args:
-        context: Installation context to mutate.
-        skill_names: Validated installation names requested for removal.
-
-    Returns:
-        Removed names, or names no longer present after acquiring the lock.
-
-    Raises:
-        EnvironmentError: If an active environment is not safe to mutate or
-            cannot be synchronized after removal.
-    """
+    """Remove installed skills and synchronize the active environment."""
     target_names = tuple(dict.fromkeys(skill_names))
     with installation_lock(context):
         ensure_active_environment_runtime_is_clean(context)
@@ -45,11 +30,13 @@ def run_remove(context: InstallContext, skill_names: list[str]) -> RemoveOutcome
         with RuntimeMutation(context) as mutation:
             for name in target_names:
                 skill_dir = context.install_path_for(name)
-                if skill_dir.exists():
+                if skill_dir.is_symlink() or skill_dir.is_file():
+                    skill_dir.unlink()
+                elif skill_dir.is_dir():
                     shutil.rmtree(skill_dir)
                 lockfile.skills.pop(name)
 
             write_lockfile(context, lockfile)
+            sync_active_environment(context)
             mutation.commit()
-        sync_active_environment(context)
     return RemoveOutcome(removed=target_names)

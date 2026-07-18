@@ -54,12 +54,9 @@ class SkillLockEntry:
     def from_dict(cls, name: str, data: dict[str, object]) -> Self:
         """Build a lock entry from a decoded TOML skill table."""
         raw_metadata = data.get("metadata")
-        metadata: dict[str, str] | None
-        if isinstance(raw_metadata, dict):
-            metadata = {str(key): str(value) for key, value in raw_metadata.items()}
-        else:
-            metadata = None
-
+        metadata = (
+            {str(key): str(value) for key, value in raw_metadata.items()} if isinstance(raw_metadata, dict) else None
+        )
         return cls(
             name=name,
             source_url=str(data.get("source_url", "")),
@@ -85,16 +82,9 @@ class SkillLockEntry:
             "description": self.description,
             "installed_at": self.installed_at,
         }
-        if self.content_hash is not None:
-            data["content_hash"] = self.content_hash
-        if self.license is not None:
-            data["license"] = self.license
-        if self.compatibility is not None:
-            data["compatibility"] = self.compatibility
-        if self.allowed_tools is not None:
-            data["allowed_tools"] = self.allowed_tools
-        if self.metadata is not None:
-            data["metadata"] = self.metadata
+        for key in ("content_hash", "license", "compatibility", "allowed_tools", "metadata"):
+            if (value := getattr(self, key)) is not None:
+                data[key] = value
         return data
 
 
@@ -107,10 +97,7 @@ class LockfileData:
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the lockfile with skill names in deterministic order."""
-        return {
-            "meta": self.meta,
-            "skills": {name: self.skills[name].to_toml_dict() for name in sorted(self.skills)},
-        }
+        return {"meta": self.meta, "skills": {name: self.skills[name].to_toml_dict() for name in sorted(self.skills)}}
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +140,6 @@ class SourceUpdateResult:
 
     refreshed: dict[str, SkillLockEntry] = field(default_factory=dict)
     updated: dict[str, SkillLockEntry] = field(default_factory=dict)
-    rewritten: set[str] = field(default_factory=set)
     warnings: list[UpdateWarning] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -162,8 +148,7 @@ class SourceUpdateResult:
 
 def _optional_string(value: object) -> str | None:
     if isinstance(value, str):
-        stripped = value.strip()
-        return stripped or None
+        return value.strip() or None
     return None
 
 

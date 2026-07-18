@@ -1,58 +1,187 @@
-"""Verify environment state persistence and runtime snapshot safeguards.
-
-The cases ensure environment operations reject missing, incomplete, or dirty
-installations without accidentally clearing the active-environment state.
-"""
+"""Verify manifest-only environment lifecycle and safety."""
 
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
 import skill_trivium.environment as environment_module
 from skill_trivium.environment import (
     EnvironmentError,
-    EnvironmentState,
     activate_environment,
     create_environment,
     deactivate_environment,
+    describe_environment,
     environment_paths,
+    list_environments,
     load_environment_state,
     load_runtime_snapshot,
     remove_environment,
     sync_active_environment,
-    write_environment_state,
 )
-from skill_trivium.lockfile import LockfileError, write_lockfile
+from skill_trivium.lockfile import load_lockfile, write_lockfile
 from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry
 from skill_trivium.skills import hash_skill_directory
 
 
-def make_context(tmp_path: Path) -> InstallContext:
-    """Build a project installation context under the test directory."""
-    project = tmp_path / "project"
-    return InstallContext(
-        mode="project",
-        base_dir=project,
-        skills_dir=project / ".agents" / "skills",
-        lockfile_path=project / "skills.lock",
-        install_prefix=Path(".agents/skills"),
-    )
+def test_create_environment_writes_one_project_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Capture the current runtime directly into the project manifest directory."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path / "project")
+    write_runtime(context, {"alpha": "alpha"})
+
+    record = create_environment(context, name="office")
+
+    manifest_path = context.base_dir / ".agents" / "environments" / "office.lock"
+    manifest = load_lockfile(manifest_path, expected_mode="project")
+    assert record.skill_count == 1
+    assert sorted(manifest.skills) == ["alpha"]
+    assert manifest.meta["environment"] == "office"
+    assert not (tmp_path / "home" / ".trivium" / "projects").exists()
 
 
-def make_entry(*, content_hash: str | None) -> SkillLockEntry:
-    """Build a representative lockfile entry."""
-    return SkillLockEntry(
-        name="alpha",
-        source_url="https://git.example.com/repo.git",
-        commit_hash="abc123",
-        content_hash=content_hash,
-        skills_path="skills",
-        install_path=".agents/skills/alpha",
-        description="Alpha",
-        installed_at="2026-01-01T00:00:00Z",
-    )
+def test_global_environment_can_activate_into_another_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use one global manifest in any current project runtime."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    first = make_context(tmp_path / "first")
+    second = make_context(tmp_path / "second")
+    write_runtime(first, {"alpha": "alpha"})
+    create_environment(first, name="office", scope="global")
+    write_runtime(second, {"beta": "beta"})
+    install_fake_materializer(monkeypatch, {"alpha": "alpha", "beta": "beta"})
+
+    activate_environment(second, "office", scope="global")
+
+    assert (second.skills_dir / "alpha" / "SKILL.md").read_text(encoding="utf-8") == "alpha"
+    assert not (second.skills_dir / "beta").exists()
+    state = load_environment_state(second)
+    assert state.active == "office"
+    assert state.scope == "global"
+    assert (tmp_path / "home" / ".trivium" / "environments" / "office.lock").is_file()
+    assert not (second.base_dir / ".agents" / "environments" / "office.lock").exists()
+
+
+def test_project_and_global_environments_with_same_name_are_explicit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep project and global namespaces separate without fallback."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path / "project")
+    write_runtime(context, {"alpha": "alpha"})
+    create_environment(context, name="office")
+    create_environment(context, name="office", scope="global")
+
+    assert [record.name for record in list_environments(context)] == ["office"]
+    assert [record.name for record in list_environments(context, scope="global")] == ["office"]
+    assert describe_environment(context, "office") is not None
+    assert describe_environment(context, "office", scope="global") is not None
+
+
+def test_active_environment_persists_runtime_changes_to_its_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Automatically update the one canonical manifest after runtime changes."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path / "project")
+    write_runtime(context, {"alpha": "alpha"})
+    create_environment(context, name="office")
+    install_fake_materializer(monkeypatch, {"alpha": "alpha", "beta": "beta"})
+    activate_environment(context, "office")
+    write_runtime(context, {"alpha": "alpha", "beta": "beta"})
+    previous_revision = load_environment_state(context).revision
+
+    sync_active_environment(context)
+
+    manifest_path = environment_paths(context, scope="project").manifest_path("office")
+    assert sorted(load_lockfile(manifest_path, expected_mode="project").skills) == ["alpha", "beta"]
+    assert load_environment_state(context).revision != previous_revision
+
+
+def test_stale_global_environment_rejects_automatic_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prevent a stale runtime from overwriting a global manifest changed elsewhere."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path / "project")
+    write_runtime(context, {"alpha": "alpha"})
+    create_environment(context, name="office", scope="global")
+    install_fake_materializer(monkeypatch, {"alpha": "alpha"})
+    activate_environment(context, "office", scope="global")
+    paths = environment_paths(context, scope="global")
+    manifest = load_lockfile(paths.manifest_path("office"), expected_mode="global")
+    manifest.meta["external_change"] = True
+    environment_module._write_manifest(paths.manifest_path("office"), manifest, name="office", scope="global")
+
+    with pytest.raises(EnvironmentError) as exc_info:
+        sync_active_environment(context)
+
+    assert exc_info.value.title == "Environment Changed Elsewhere"
+
+
+def test_deactivate_restores_previous_runtime_from_its_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore the runtime captured immediately before activation."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path / "project")
+    write_runtime(context, {"alpha": "alpha"})
+    create_environment(context, name="office")
+    write_runtime(context, {"beta": "beta"})
+    install_fake_materializer(monkeypatch, {"alpha": "alpha", "beta": "beta"})
+    activate_environment(context, "office")
+
+    assert deactivate_environment(context)
+
+    assert (context.skills_dir / "beta" / "SKILL.md").read_text(encoding="utf-8") == "beta"
+    assert not (context.skills_dir / "alpha").exists()
+    assert load_environment_state(context).active is None
+
+
+def test_deactivate_global_environment_after_manifest_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Always allow restoration even when a global manifest became stale."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path / "project")
+    write_runtime(context, {"alpha": "alpha"})
+    create_environment(context, name="office", scope="global")
+    write_runtime(context, {"beta": "beta"})
+    install_fake_materializer(monkeypatch, {"alpha": "alpha", "beta": "beta"})
+    activate_environment(context, "office", scope="global")
+    paths = environment_paths(context, scope="global")
+    manifest = load_lockfile(paths.manifest_path("office"), expected_mode="global")
+    manifest.meta["external_change"] = True
+    environment_module._write_manifest(paths.manifest_path("office"), manifest, name="office", scope="global")
+
+    assert deactivate_environment(context)
+
+    assert (context.skills_dir / "beta" / "SKILL.md").is_file()
+    assert load_environment_state(context).active is None
+
+
+def test_remove_rejects_active_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require deactivation before deleting the canonical manifest."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    context = make_context(tmp_path / "project")
+    write_runtime(context, {"alpha": "alpha"})
+    create_environment(context, name="office")
+    install_fake_materializer(monkeypatch, {"alpha": "alpha"})
+    activate_environment(context, "office")
+
+    with pytest.raises(EnvironmentError) as exc_info:
+        remove_environment(context, "office")
+
+    assert exc_info.value.title == "Environment Is Active"
 
 
 @pytest.mark.parametrize(
@@ -65,439 +194,107 @@ def make_entry(*, content_hash: str | None) -> SkillLockEntry:
 )
 def test_load_runtime_snapshot_rejects_inconsistent_runtime(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     state: str,
     expected_title: str,
 ) -> None:
     """Reject runtime snapshots with missing, stale, or incomplete data."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
-    content_hash = None if state == "missing-hash" else "incorrect-hash"
-    write_lockfile(context, LockfileData(skills={"alpha": make_entry(content_hash=content_hash)}))
-    if state != "missing":
-        skill_dir = context.install_path_for("alpha")
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text("alpha", encoding="utf-8")
+    context = make_context(tmp_path / "project")
+    skill_dir = context.install_path_for("alpha")
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("alpha", encoding="utf-8")
+    content_hash = None if state == "missing-hash" else "f" * 64
+    write_lockfile(context, LockfileData(skills={"alpha": make_entry("alpha", content_hash)}))
+    if state == "missing":
+        environment_module.shutil.rmtree(skill_dir)
 
     with pytest.raises(EnvironmentError) as exc_info:
-        load_runtime_snapshot(context, require_content_hashes=True)
+        load_runtime_snapshot(context)
 
     assert exc_info.value.title == expected_title
-    assert exc_info.value.exit_code == 2
-    assert "alpha" in str(exc_info.value)
 
 
-def test_sync_active_environment_reports_missing_snapshot_without_clearing_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Preserve active state when its snapshot is missing."""
+def test_environment_storage_rejects_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not follow a redirected canonical manifest directory."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
-    write_environment_state(context, EnvironmentState(active="office"))
+    context = make_context(tmp_path / "project")
+    write_runtime(context, {})
+    target = tmp_path / "outside"
+    target.mkdir()
+    manifests_dir = context.base_dir / ".agents" / "environments"
+    manifests_dir.parent.mkdir(parents=True, exist_ok=True)
+    manifests_dir.symlink_to(target, target_is_directory=True)
 
     with pytest.raises(EnvironmentError) as exc_info:
-        sync_active_environment(context)
+        create_environment(context, name="office")
 
-    assert exc_info.value.title == "Missing Environment Snapshot"
-    assert load_environment_state(context).active == "office"
-
-
-def test_write_environment_state_preserves_previous_state_when_replace_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keep the previous active state when its atomic replacement fails."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
-    write_environment_state(context, EnvironmentState(active="office"))
-    state_path = environment_paths(context, scope="project").state_path
-    real_replace = environment_module.os.replace
-
-    def fail_state_replace(source: Path, destination: Path) -> None:
-        if Path(destination) == state_path:
-            raise OSError("simulated state replacement failure")
-        real_replace(source, destination)
-
-    monkeypatch.setattr(environment_module.os, "replace", fail_state_replace)
-
-    with pytest.raises(OSError, match="simulated state replacement failure"):
-        write_environment_state(context, EnvironmentState(active="studio"))
-
-    assert load_environment_state(context).active == "office"
+    assert exc_info.value.title == "Unsafe Environment Storage"
 
 
-def test_activate_environment_reloads_state_after_acquiring_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Observe an environment activated while waiting for the mutation lock."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
+def test_environment_manifest_rejects_symlink(tmp_path: Path) -> None:
+    """Reject an environment whose manifest file is itself a symlink."""
+    context = make_context(tmp_path / "project")
+    write_runtime(context, {})
+    create_environment(context, name="office")
+    manifest = environment_paths(context, scope="project").manifest_path("office")
+    target = tmp_path / "redirected.lock"
+    manifest.replace(target)
+    manifest.symlink_to(target)
 
-    @contextmanager
-    def activate_while_locking(locked_context: InstallContext) -> Iterator[None]:
-        assert locked_context is context
-        write_environment_state(context, EnvironmentState(active="office"))
-        yield
-
-    monkeypatch.setattr(environment_module, "installation_lock", activate_while_locking)
-
-    with pytest.raises(EnvironmentError) as exc_info:
-        activate_environment(context, "office")
-
-    assert exc_info.value.title == "Environment Already Active"
-    assert load_environment_state(context).active == "office"
+    with pytest.raises(EnvironmentError, match="regular file"):
+        describe_environment(context, "office")
 
 
-def test_deactivate_environment_reloads_state_after_acquiring_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Observe an environment deactivated while waiting for the mutation lock."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
-    write_environment_state(context, EnvironmentState(active="office"))
-
-    @contextmanager
-    def deactivate_while_locking(locked_context: InstallContext) -> Iterator[None]:
-        assert locked_context is context
-        write_environment_state(context, EnvironmentState())
-        yield
-
-    monkeypatch.setattr(environment_module, "installation_lock", deactivate_while_locking)
-
-    was_active = deactivate_environment(context)
-
-    assert not was_active
-    assert load_environment_state(context).active is None
-
-
-def test_activate_environment_restores_previous_runtime_when_state_write_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Roll back activation when the active-state commit fails."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
-    paths = environment_paths(context, scope="project")
-    paths.env_dir("office").mkdir(parents=True)
-    restored_snapshots: list[Path] = []
-    real_restore = environment_module._restore_snapshot
-
-    def record_restore(snapshot_dir: Path, restore_context: InstallContext) -> None:
-        restored_snapshots.append(snapshot_dir)
-        real_restore(snapshot_dir, restore_context)
-
-    def failed_state_write(_context: InstallContext, _state: EnvironmentState) -> None:
-        raise OSError("simulated state write failure")
-
-    monkeypatch.setattr(environment_module, "_restore_snapshot", record_restore)
-    monkeypatch.setattr(environment_module, "write_environment_state", failed_state_write)
-
-    with pytest.raises(OSError, match="simulated state write failure"):
-        activate_environment(context, "office")
-
-    assert restored_snapshots == [paths.env_dir("office"), paths.default_dir]
-    assert load_environment_state(context).active is None
-
-
-def test_deactivate_environment_restores_active_runtime_when_state_clear_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Roll back deactivation when clearing active state fails."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
-    paths = environment_paths(context, scope="project")
-    paths.env_dir("office").mkdir(parents=True)
-    paths.default_dir.mkdir(parents=True)
-    write_environment_state(context, EnvironmentState(active="office"))
-    restored_snapshots: list[Path] = []
-    real_restore = environment_module._restore_snapshot
-
-    def record_restore(snapshot_dir: Path, restore_context: InstallContext) -> None:
-        restored_snapshots.append(snapshot_dir)
-        real_restore(snapshot_dir, restore_context)
-
-    def failed_state_write(_context: InstallContext, _state: EnvironmentState) -> None:
-        raise OSError("simulated state clear failure")
-
-    monkeypatch.setattr(environment_module, "_restore_snapshot", record_restore)
-    monkeypatch.setattr(environment_module, "write_environment_state", failed_state_write)
-
-    with pytest.raises(OSError, match="simulated state clear failure"):
-        deactivate_environment(context)
-
-    assert restored_snapshots == [paths.default_dir, paths.env_dir("office")]
-    assert load_environment_state(context).active == "office"
-
-
-def test_remove_environment_reloads_snapshot_state_after_acquiring_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reject removal when the environment disappears while waiting for the lock."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
-    environment_dir = environment_paths(context, scope="project").env_dir("office")
-    environment_dir.mkdir(parents=True)
-
-    @contextmanager
-    def remove_while_locking(locked_context: InstallContext) -> Iterator[None]:
-        assert locked_context is context
-        environment_dir.rmdir()
-        yield
-
-    monkeypatch.setattr(environment_module, "installation_lock", remove_while_locking)
-
-    with pytest.raises(EnvironmentError) as exc_info:
-        remove_environment(context, "office")
-
-    assert exc_info.value.title == "Environment Not Found"
-
-
-def test_create_environment_reloads_conflicts_after_acquiring_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reject creation when the environment appears while waiting for the lock."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
-    environment_dir = environment_paths(context, scope="project").env_dir("office")
-
-    @contextmanager
-    def create_while_locking(locked_context: InstallContext) -> Iterator[None]:
-        assert locked_context is context
-        environment_dir.mkdir(parents=True)
-        yield
-
-    monkeypatch.setattr(environment_module, "installation_lock", create_while_locking)
-
-    with pytest.raises(EnvironmentError) as exc_info:
-        create_environment(context, name="office", empty=True, shared=False)
-
-    assert exc_info.value.title == "Environment Exists"
-
-
-def test_global_environment_creation_uses_same_global_lock_across_projects(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Serialize global environment writes from different project contexts."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    first_context = make_context(tmp_path)
-    second_project = tmp_path / "second-project"
-    second_context = InstallContext(
+def make_context(project: Path) -> InstallContext:
+    """Build a project installation context."""
+    return InstallContext(
         mode="project",
-        base_dir=second_project,
-        skills_dir=second_project / ".agents" / "skills",
-        lockfile_path=second_project / "skills.lock",
+        base_dir=project,
+        skills_dir=project / ".agents" / "skills",
+        lockfile_path=project / "skills.lock",
         install_prefix=Path(".agents/skills"),
     )
-    locked_paths: list[Path] = []
-
-    @contextmanager
-    def record_lock(locked_context: InstallContext) -> Iterator[None]:
-        locked_paths.append(locked_context.lockfile_path)
-        yield
-
-    monkeypatch.setattr(environment_module, "installation_lock", record_lock)
-
-    create_environment(first_context, name="office", empty=True, shared=False, scope="global")
-    create_environment(second_context, name="studio", empty=True, shared=False, scope="global")
-
-    global_lockfile = tmp_path / "home" / ".agents" / "skills.lock"
-    assert locked_paths == [first_context.lockfile_path, global_lockfile, second_context.lockfile_path, global_lockfile]
 
 
-def test_project_activation_reloads_global_fallback_after_acquiring_global_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reject a global fallback removed while a project waits for its lock."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    context = make_context(tmp_path)
-    global_environment_dir = environment_paths(context, scope="global").env_dir("office")
-    global_environment_dir.mkdir(parents=True)
-
-    @contextmanager
-    def remove_while_locking(locked_context: InstallContext) -> Iterator[None]:
-        assert locked_context.lockfile_path == tmp_path / "home" / ".agents" / "skills.lock"
-        global_environment_dir.rmdir()
-        yield
-
-    monkeypatch.setattr(environment_module, "installation_lock", remove_while_locking)
-
-    with pytest.raises(EnvironmentError) as exc_info:
-        environment_module._ensure_environment_available(context, "office")
-
-    assert exc_info.value.title == "Environment Not Found"
-    assert not environment_paths(context, scope="project").env_dir("office").exists()
+def write_runtime(context: InstallContext, skills: dict[str, str]) -> None:
+    """Write a valid managed runtime containing simple skill documents."""
+    if context.skills_dir.exists():
+        environment_module.shutil.rmtree(context.skills_dir)
+    context.skills_dir.mkdir(parents=True)
+    entries = {}
+    for name, content in skills.items():
+        skill_dir = context.skills_dir / name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        entries[name] = make_entry(name, hash_skill_directory(skill_dir))
+    write_lockfile(context, LockfileData(skills=entries))
 
 
-def test_restore_snapshot_validates_lockfile_before_replacing_runtime(tmp_path: Path) -> None:
-    """Keep the current runtime when a replacement snapshot is malformed."""
-    context = make_context(tmp_path)
-    installed_skill = context.install_path_for("alpha")
-    installed_skill.mkdir(parents=True)
-    installed_document = installed_skill / "SKILL.md"
-    installed_document.write_text("original runtime", encoding="utf-8")
-
-    snapshot_dir = tmp_path / "snapshot"
-    snapshot_skill = snapshot_dir / "skills" / "alpha"
-    snapshot_skill.mkdir(parents=True)
-    (snapshot_skill / "SKILL.md").write_text("replacement runtime", encoding="utf-8")
-    (snapshot_dir / "skills.lock").write_text("[invalid", encoding="utf-8")
-
-    with pytest.raises(LockfileError):
-        environment_module._restore_snapshot(snapshot_dir, context)
-
-    assert installed_document.read_text(encoding="utf-8") == "original runtime"
-
-
-def test_restore_snapshot_rejects_hash_mismatch_before_replacing_runtime(tmp_path: Path) -> None:
-    """Keep the current runtime when snapshot content does not match its hash."""
-    context = make_context(tmp_path)
-    installed_skill = context.install_path_for("alpha")
-    installed_skill.mkdir(parents=True)
-    installed_document = installed_skill / "SKILL.md"
-    installed_document.write_text("original runtime", encoding="utf-8")
-
-    snapshot_dir = tmp_path / "snapshot"
-    snapshot_skill = snapshot_dir / "skills" / "alpha"
-    snapshot_skill.mkdir(parents=True)
-    (snapshot_skill / "SKILL.md").write_text("corrupted snapshot", encoding="utf-8")
-    write_lockfile(
-        InstallContext(
-            mode="project",
-            base_dir=snapshot_dir,
-            skills_dir=snapshot_dir / "skills",
-            lockfile_path=snapshot_dir / "skills.lock",
-            install_prefix=Path("skills"),
-        ),
-        LockfileData(skills={"alpha": make_entry(content_hash="incorrect-hash")}),
+def make_entry(name: str, content_hash: str | None) -> SkillLockEntry:
+    """Build a representative pinned manifest entry."""
+    return SkillLockEntry(
+        name=name,
+        source_url="https://example.com/skills.git",
+        commit_hash="a" * 40,
+        content_hash=content_hash,
+        skills_path="skills",
+        install_path=f".agents/skills/{name}",
+        description=name,
+        installed_at="2026-01-01T00:00:00Z",
     )
 
-    with pytest.raises(EnvironmentError) as exc_info:
-        environment_module._restore_snapshot(snapshot_dir, context)
 
-    assert exc_info.value.title == "Runtime Has Local Modifications"
-    assert installed_document.read_text(encoding="utf-8") == "original runtime"
+def install_fake_materializer(monkeypatch: pytest.MonkeyPatch, contents: dict[str, str]) -> None:
+    """Materialize test manifests without accessing remote Git repositories."""
 
+    @contextmanager
+    def materialized(manifest: LockfileData) -> Iterator[Path]:
+        with TemporaryDirectory() as temp_dir_name:
+            skills_dir = Path(temp_dir_name) / "skills"
+            skills_dir.mkdir()
+            for name in manifest.skills:
+                skill_dir = skills_dir / name
+                skill_dir.mkdir()
+                (skill_dir / "SKILL.md").write_text(contents[name], encoding="utf-8")
+            yield skills_dir
 
-def test_restore_snapshot_rejects_unmanaged_skill_before_replacing_runtime(tmp_path: Path) -> None:
-    """Keep the current runtime when a snapshot has no matching lock entry."""
-    context = make_context(tmp_path)
-    installed_skill = context.install_path_for("alpha")
-    installed_skill.mkdir(parents=True)
-    installed_document = installed_skill / "SKILL.md"
-    installed_document.write_text("original runtime", encoding="utf-8")
-
-    unmanaged_skill = tmp_path / "snapshot" / "skills" / "rogue"
-    unmanaged_skill.mkdir(parents=True)
-    (unmanaged_skill / "SKILL.md").write_text("unmanaged snapshot", encoding="utf-8")
-
-    with pytest.raises(EnvironmentError) as exc_info:
-        environment_module._restore_snapshot(tmp_path / "snapshot", context)
-
-    assert exc_info.value.title == "Unmanaged Skills Detected"
-    assert installed_document.read_text(encoding="utf-8") == "original runtime"
-
-
-def test_restore_snapshot_rolls_back_runtime_when_lockfile_write_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Restore the previous skill tree when committing a snapshot fails."""
-    context = make_context(tmp_path)
-    installed_skill = context.install_path_for("alpha")
-    installed_skill.mkdir(parents=True)
-    installed_document = installed_skill / "SKILL.md"
-    installed_document.write_text("original runtime", encoding="utf-8")
-
-    snapshot_dir = tmp_path / "snapshot"
-    snapshot_skill = snapshot_dir / "skills" / "alpha"
-    snapshot_skill.mkdir(parents=True)
-    (snapshot_skill / "SKILL.md").write_text("replacement runtime", encoding="utf-8")
-    write_lockfile(
-        InstallContext(
-            mode="project",
-            base_dir=snapshot_dir,
-            skills_dir=snapshot_dir / "skills",
-            lockfile_path=snapshot_dir / "skills.lock",
-            install_prefix=Path("skills"),
-        ),
-        LockfileData(skills={"alpha": make_entry(content_hash=hash_skill_directory(snapshot_skill))}),
-    )
-
-    def failed_write(_context: InstallContext, _lockfile: LockfileData) -> None:
-        raise OSError("simulated write failure")
-
-    monkeypatch.setattr(environment_module, "write_lockfile", failed_write)
-
-    with pytest.raises(OSError, match="simulated write failure"):
-        environment_module._restore_snapshot(snapshot_dir, context)
-
-    assert installed_document.read_text(encoding="utf-8") == "original runtime"
-
-
-def test_snapshot_write_preserves_previous_snapshot_when_staging_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keep the previous snapshot when writing its staged replacement fails."""
-    snapshot_dir = tmp_path / "snapshot"
-    snapshot_dir.mkdir()
-    previous_marker = snapshot_dir / "previous.txt"
-    previous_marker.write_text("previous snapshot", encoding="utf-8")
-    source_skills = tmp_path / "source-skills"
-    source_skills.mkdir()
-
-    def failed_write(*args: object, **kwargs: object) -> None:
-        raise OSError("simulated snapshot write failure")
-
-    monkeypatch.setattr(environment_module, "write_lockfile_path", failed_write)
-
-    with pytest.raises(OSError, match="simulated snapshot write failure"):
-        environment_module._write_environment_snapshot(
-            snapshot_dir,
-            lockfile=LockfileData(),
-            source_skills_dir=source_skills,
-            environment_name="office",
-            mode="project",
-        )
-
-    assert previous_marker.read_text(encoding="utf-8") == "previous snapshot"
-
-
-def test_snapshot_write_restores_previous_snapshot_when_swap_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Restore the previous snapshot when promoting the staged tree fails."""
-    snapshot_dir = tmp_path / "snapshot"
-    snapshot_dir.mkdir()
-    previous_marker = snapshot_dir / "previous.txt"
-    previous_marker.write_text("previous snapshot", encoding="utf-8")
-    source_skills = tmp_path / "source-skills"
-    source_skills.mkdir()
-    real_replace = environment_module.os.replace
-
-    def fail_staged_swap(source: Path, destination: Path) -> None:
-        if Path(source).name == "snapshot" and Path(destination) == snapshot_dir:
-            raise OSError("simulated snapshot swap failure")
-        real_replace(source, destination)
-
-    monkeypatch.setattr(environment_module.os, "replace", fail_staged_swap)
-
-    with pytest.raises(OSError, match="simulated snapshot swap failure"):
-        environment_module._write_environment_snapshot(
-            snapshot_dir,
-            lockfile=LockfileData(),
-            source_skills_dir=source_skills,
-            environment_name="office",
-            mode="project",
-        )
-
-    assert previous_marker.read_text(encoding="utf-8") == "previous snapshot"
+    monkeypatch.setattr(environment_module, "_materialized_environment", materialized)

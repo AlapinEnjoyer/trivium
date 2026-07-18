@@ -123,6 +123,7 @@ def test_clone_repository_builds_shallow_clone_command(tmp_path: Path, monkeypat
         "--depth",
         "1",
         "--single-branch",
+        "--",
         "https://git.example.com/repo.git",
         str(destination),
     ]
@@ -135,7 +136,7 @@ def test_checkout_revision_raises_sanitized_error(tmp_path: Path, monkeypatch: p
     """Convert checkout failures into a sanitized domain exception."""
 
     def fake_run(command: list[str], **kwargs: object) -> object:
-        assert command == ["git", "checkout", "--quiet", "missing"]
+        assert command == ["git", "checkout", "--quiet", "missing", "--"]
         assert kwargs["cwd"] == tmp_path
         return type("Result", (), {"returncode": 1, "stderr": "fatal: bad revision\nmore detail\n"})()
 
@@ -147,3 +148,9 @@ def test_checkout_revision_raises_sanitized_error(tmp_path: Path, monkeypatch: p
     assert exc_info.value.source_url == "https://git.example.com/repo.git"
     assert exc_info.value.revision == "missing"
     assert exc_info.value.stderr == "fatal: bad revision"
+
+
+def test_clone_repository_rejects_credential_url(tmp_path: Path) -> None:
+    """Prevent credentials from reaching process arguments or lockfiles."""
+    with pytest.raises(GitCloneError, match="must not include credentials"):
+        clone_repository("https://user:token@example.com/repo.git", tmp_path / "repo")

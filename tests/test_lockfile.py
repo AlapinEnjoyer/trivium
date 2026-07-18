@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-import skill_trivium.lockfile as lockfile_module
 from skill_trivium.lockfile import LockfileError, load_lockfile, render_lockfile, write_lockfile_path
 from skill_trivium.models import LockfileData, SkillLockEntry
 
@@ -18,8 +17,8 @@ def make_entry(name: str, *, optional: bool) -> SkillLockEntry:
     return SkillLockEntry(
         name=name,
         source_url="https://example.com/skills.git",
-        commit_hash="abc123",
-        content_hash="hash" if optional else None,
+        commit_hash="a" * 7,
+        content_hash="b" * 64 if optional else None,
         skills_path="skills",
         install_path=f".agents/skills/{name}",
         description=f"{name} description",
@@ -81,13 +80,13 @@ def test_write_lockfile_path_replaces_file_atomically(tmp_path: Path, monkeypatc
     path = tmp_path / "skills.lock"
     path.write_text("old content", encoding="utf-8")
     replacements: list[tuple[Path, Path]] = []
-    real_replace = lockfile_module.os.replace
+    real_replace = Path.replace
 
-    def recording_replace(source: Path, destination: Path) -> None:
-        replacements.append((Path(source), Path(destination)))
-        real_replace(source, destination)
+    def recording_replace(source: Path, destination: Path) -> Path:
+        replacements.append((source, destination))
+        return real_replace(source, destination)
 
-    monkeypatch.setattr(lockfile_module.os, "replace", recording_replace)
+    monkeypatch.setattr(Path, "replace", recording_replace)
 
     write_lockfile_path(
         path,
@@ -99,3 +98,12 @@ def test_write_lockfile_path_replaces_file_atomically(tmp_path: Path, monkeypatc
     assert replacements[0][0].parent == path.parent
     assert replacements[0][1] == path
     assert load_lockfile(path, expected_mode="global") == LockfileData(meta={"version": 1, "mode": "global"})
+
+
+def test_load_lockfile_rejects_boolean_version(tmp_path: Path) -> None:
+    """Do not accept TOML booleans as integer lockfile versions."""
+    path = tmp_path / "skills.lock"
+    path.write_text('[meta]\nversion = true\nmode = "project"\n[skills]\n', encoding="utf-8")
+
+    with pytest.raises(LockfileError, match="Unsupported lockfile version"):
+        load_lockfile(path)

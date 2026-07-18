@@ -40,7 +40,7 @@ Every command and subcommand in `trv` comes with a built-in help menu. You can a
 ```bash
 trv --help
 trv add -h
-trv init --help
+trv env --help
 ```
 
 ## Quick Start
@@ -64,11 +64,9 @@ trv list
 # Update installed skills
 trv update
 
-# Create a new skill scaffold
-trv init my-skill
 ```
 
-By default, `trv` uses project mode in the current directory. If you are inside a git repository, the project root is the git root. If you are not in a git repository, the project root is simply your current working directory. Use `--global` or `-g` when you explicitly want `~/.agents/skills/`.
+By default, skill commands use project mode in the current directory. If you are inside a git repository, the project root is the git root. If you are not in a git repository, the project root is simply your current working directory. Use `--global` or `-g` on skill commands when you explicitly want `~/.agents/skills/`.
 
 ## Commands
 
@@ -143,16 +141,6 @@ trv remove -a -y           # Skip confirmation (--yes)
 trv remove skill1 --global # Remove a global skill
 ```
 
-### `init` - Create a new skill
-
-```bash
-trv init my-skill           # Minimal scaffold
-trv init my-skill --full    # Include scripts/, references/, assets/
-trv init my-skill --global  # Scaffold in ~/.trivium/skills/
-```
-
-Scaffolds are source trees rather than installed runtime entries. Project scaffolds are created under the project root's `skills/` directory; `--global` uses `~/.trivium/skills/`. Install a completed scaffold through `trv add` when it should become part of a managed runtime.
-
 ### `env` - Manage named environments
 
 ```bash
@@ -160,14 +148,11 @@ trv env list
 trv env list --global
 trv env create office
 trv env create office --global
-trv env create office --shared
-trv env create scratch --empty
 trv env activate office
 trv env activate office --global
 trv env info
 trv env info office --global
 trv env deactivate
-trv env deactivate --global
 trv env remove office
 trv env remove office --global
 ```
@@ -195,28 +180,22 @@ trv env remove office --global
 
 This enables `trv update` to fetch newer versions from the original sources.
 
-Trivium keeps one lockfile per project and one global lockfile. Environment lockfiles under `.agents/environments/` or `~/.trivium/` are separate snapshots, not additional global manifests. Lockfile format versions and project/global modes are validated before use. Runtime and environment mutations are serialized, metadata writes are atomic, and staged filesystem changes preserve the previous state when a commit fails.
+Trivium keeps one runtime lockfile per project and one for the global skill installation. Environment manifests under `.agents/environments/` or `~/.trivium/environments/` contain pinned skill definitions rather than copied skill trees. Lockfile format versions and project/global modes are validated before use. Runtime and environment mutations are serialized, metadata writes are atomic, and staged filesystem changes preserve the previous state when a commit fails.
 
 If a skill directory exists but is not recorded in the corresponding lockfile, `trv add` refuses to replace it. Move or remove that directory explicitly before retrying.
 
 ## Environments
 
-Named environments are optional. If you do not use `trv env`, `trv` keeps the current behavior and works directly with the active runtime in `.agents/skills/` and `skills.lock`.
+Named environments are optional manifests of pinned skills. They do not store copied skill trees; activation checks out the recorded commits and materializes them into the current project's `.agents/skills/` runtime.
 
-- `trv env create <name>` captures the current runtime by default
-- `trv env create <name> --global` captures the current project's runtime and stores the snapshot under `~/.trivium/global/envs/<name>/`
-- global environment names share one account-wide namespace; they are not owned by the project that created them
-- multiple global environments can coexist when they have different names; creating an existing name fails instead of overwriting it
-- remove an existing global environment with `trv env remove <name> --global` before recreating that name
-- `--empty` creates an empty environment
-- `--shared` also writes a shareable definition to `.agents/environments/<name>.lock`
-- `--shared` is project-only and cannot be combined with `--global`
-- `trv env activate <name>` swaps the active runtime to that environment
-- project activation also falls back to globally stored environments when no project-scoped env with that name exists
-- activating a global environment from a project creates a project-local copy; later project changes do not overwrite the stored global snapshot
-- `trv env activate <name> --global` activates that environment directly into `~/.agents/skills/`
-- if only `.agents/environments/<name>.lock` exists, `trv env activate <name>` materializes a local snapshot from that shared definition first
-- `trv env deactivate` restores the previous non-environment runtime
-- `trv env remove <name>` removes the local snapshot and shared definition, and auto-deactivates it first if needed
+- `trv env create <name>` writes a commit-friendly project manifest to `.agents/environments/<name>.lock`
+- `trv env create <name> --global` writes a reusable personal manifest to `~/.trivium/environments/<name>.lock`
+- `trv env activate <name>` activates only the project manifest with that name
+- `trv env activate <name> --global` activates a global manifest into the current project from any directory or repository
+- activation is reproducible and never advances pinned commits; use `trv update` to update them intentionally
+- `trv add`, `trv update`, and `trv remove` automatically update the active manifest
+- global manifest writes reject stale runtimes when another repository changed the same environment
+- `trv env deactivate` restores the runtime that preceded activation
+- active environments must be deactivated before their manifest can be removed
 
-Project-local environment snapshots are stored under a project-specific hashed directory in `~/.trivium/projects/`. Global snapshots are stored under `~/.trivium/global/envs/`. Shared environment definitions are only available in project mode.
+Project and global environments use separate, explicit namespaces. There is no implicit global fallback or project-local copy of a global manifest.

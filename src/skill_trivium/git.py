@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,29 +84,22 @@ def cloned_repo_at_revision(source_url: str, revision: str) -> Iterator[Path]:
 
 
 def clone_repository(source_url: str, destination: Path, *, shallow: bool = True) -> None:
-    """Clone a repository and optionally limit the clone to its latest commit.
+    """Clone a Git repository to a destination path.
 
     Args:
-        source_url: Git URL to clone.
-        destination: Directory in which Git should create the repository.
-        shallow: Whether to request a single-branch depth-one clone.
-
-    Raises:
-        GitCloneError: If Git exits unsuccessfully. Interactive stderr is also
-            forwarded so credential prompts remain usable.
+        source_url: Remote repository URL.
+        destination: Local path to clone into.
+        shallow: Whether to use a shallow clone (depth 1).
     """
+    if source_url.lower().startswith(("http://", "https://")) and "@" in urlsplit(source_url).netloc:
+        raise GitCloneError(source_url, "HTTP(S) Git repository URLs must not include credentials.", False)
     command = ["git", "clone", "--quiet"]
     if shallow:
         command.extend(["--depth", "1", "--single-branch"])
-    command.extend([source_url, str(destination)])
+    command.extend(["--", source_url, str(destination)])
     stderr_chunks: list[str] = []
     show_stderr = sys.stdin.isatty() and sys.stderr.isatty()
-    with subprocess.Popen(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    ) as process:
+    with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) as process:
         assert process.stderr is not None
         while chunk := process.stderr.read(1):
             stderr_chunks.append(chunk)
@@ -116,66 +110,55 @@ def clone_repository(source_url: str, destination: Path, *, shallow: bool = True
 
     if returncode == 0:
         return
-
     raw_stderr = "".join(stderr_chunks)
     stderr = sanitize_git_error(raw_stderr)
     auth_failure, guidance = classify_auth_failure(source_url, raw_stderr)
-    raise GitCloneError(source_url=source_url, stderr=stderr, auth_failure=auth_failure, guidance=guidance)
+    raise GitCloneError(source_url, stderr, auth_failure, guidance)
 
 
 def current_commit(repo_path: Path) -> str:
-    """Read the full commit hash currently checked out in a repository.
-
-    Args:
-        repo_path: Existing local Git repository path.
-
-    Returns:
-        The trimmed output of ``git rev-parse HEAD``.
-
-    Raises:
-        subprocess.CalledProcessError: If the repository has no readable HEAD.
-    """
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    """Return the full SHA of the current HEAD commit."""
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_path, capture_output=True, text=True, check=True)
     return result.stdout.strip()
 
 
 def checkout_revision(repo_path: Path, *, source_url: str, revision: str) -> None:
-    """Check out a revision or raise a sanitized checkout error.
+    """Check out a specific revision in an existing local clone.
 
     Args:
-        repo_path: Existing local Git repository path.
-        source_url: Original source URL used for diagnostic context.
-        revision: Commit, tag, or branch revision to check out.
-
-    Raises:
-        GitCheckoutError: If Git cannot resolve or check out the revision.
+        repo_path: Path to the local repository.
+        source_url: Remote URL (used only for error messages).
+        revision: Git ref or SHA to check out.
     """
+    if revision.startswith("-"):
+        raise GitCheckoutError(source_url, revision, "Git revisions must not start with '-'.")
     result = subprocess.run(
-        ["git", "checkout", "--quiet", revision],
+        ["git", "checkout", "--quiet", revision, "--"],
         cwd=repo_path,
         capture_output=True,
         text=True,
         check=False,
     )
-    if result.returncode == 0:
-        return
-    raise GitCheckoutError(source_url=source_url, revision=revision, stderr=sanitize_git_error(result.stderr))
+    if result.returncode != 0:
+        raise GitCheckoutError(source_url, revision, sanitize_git_error(result.stderr))
 
 
 def sanitize_git_error(stderr: str) -> str:
-    """Return the first useful non-empty line from Git stderr."""
+    """Extract the first meaningful line from a Git error stream."""
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     return lines[0] if lines else "Git command failed."
 
 
 def classify_auth_failure(source_url: str, stderr: str) -> tuple[bool, str | None]:
-    """Classify Git stderr and return authentication guidance when applicable."""
+    """Determine whether a Git error indicates an authentication failure.
+
+    Args:
+        source_url: The remote URL that was being accessed.
+        stderr: Raw stderr output from the failed Git command.
+
+    Returns:
+        A tuple of (is_auth_failure, guidance_message_or_None).
+    """
     lowered = stderr.lower()
     patterns = (
         "permission denied",
@@ -186,9 +169,8 @@ def classify_auth_failure(source_url: str, stderr: str) -> tuple[bool, str | Non
     )
     if not any(pattern in lowered for pattern in patterns):
         return False, None
-
     if source_url.startswith(("git@", "ssh://")):
-        return True, "Run `ssh -T git@github.com` to verify your key is loaded."
+        return True, "Verify that your SSH key is loaded and authorized for this remote."
     if source_url.startswith(("https://", "http://")):
         return True, "Run `git config --global credential.helper` to check your credential store."
     return True, "Check that your git credentials are configured for this remote."

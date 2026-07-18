@@ -77,11 +77,11 @@ def test_run_remove_restores_runtime_when_lockfile_write_fails(
     assert sorted(load_lockfile(context.lockfile_path, expected_mode="project").skills) == ["alpha"]
 
 
-def test_run_remove_keeps_committed_runtime_when_environment_sync_fails(
+def test_run_remove_restores_runtime_when_environment_sync_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Treat environment synchronization as post-commit reconciliation."""
+    """Roll back the runtime and lockfile when environment synchronization fails."""
     context = _make_context(tmp_path)
     skill_dir = context.install_path_for("alpha")
     skill_dir.mkdir(parents=True)
@@ -96,8 +96,8 @@ def test_run_remove_keeps_committed_runtime_when_environment_sync_fails(
     with pytest.raises(EnvironmentError, match="simulated sync failure"):
         run_remove(context, ["alpha"])
 
-    assert not skill_dir.exists()
-    assert load_lockfile(context.lockfile_path, expected_mode="project").skills == {}
+    assert skill_dir.is_dir()
+    assert sorted(load_lockfile(context.lockfile_path, expected_mode="project").skills) == ["alpha"]
 
 
 def _make_context(tmp_path: Path) -> InstallContext:
@@ -114,8 +114,8 @@ def _make_entry(name: str) -> SkillLockEntry:
     return SkillLockEntry(
         name=name,
         source_url="https://example.com/skills.git",
-        commit_hash="abc123",
-        content_hash="hash",
+        commit_hash="a" * 7,
+        content_hash="b" * 64,
         skills_path="skills",
         install_path=f".agents/skills/{name}",
         description=name,
