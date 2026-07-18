@@ -122,19 +122,7 @@ def add(
         help="Install to ~/.agents/skills/ regardless of git context.",
     ),
 ) -> None:
-    """Install selected skills from a Git repository.
-
-    Args:
-        ctx: Typer command context used by the add workflow.
-        url: Repository URL containing one or more skill directories.
-        all_: Install every valid skill found in the repository.
-        skills: Optional space-separated names to install.
-        path: Optional repository-relative skills container path.
-        yes: Replace conflicts without prompting.
-        dry_run: Preview changes without writing files.
-        ignore_validation: Install skills despite validation issues.
-        global_: Install into the global agent directory.
-    """
+    """Install selected skills from a Git repository."""
     run_add(
         ctx=ctx,
         url=url,
@@ -167,13 +155,7 @@ def update(
         help="Update skills in the global install instead of the current project.",
     ),
 ) -> None:
-    """Update installed skills from their recorded source repositories.
-
-    Args:
-        skills: Optional installed skill names. An omitted value updates all.
-        dry_run: Preview updates without changing the runtime or lockfile.
-        global_: Update the global installation instead of the current project.
-    """
+    """Update installed skills from their recorded source repositories."""
     context = resolve_install_context(global_)
     try:
         outcome = run_update(

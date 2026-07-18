@@ -48,9 +48,10 @@ automatically update the active manifest to match the new runtime state.
 
 ## Global manifest locking
 
-Global manifests use a stale-writer lock. If two repositories modify the same
-global environment, the second write fails with a conflict error instead of
-silently overwriting.
+Global manifest mutations use a filesystem lock so concurrent operations wait
+for one another instead of writing at the same time. The lock coordinates
+access to shared global environment metadata; it is not part of the manifest
+contents.
 
 ## Namespaces
 

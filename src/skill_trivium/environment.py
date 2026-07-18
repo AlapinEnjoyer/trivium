@@ -17,7 +17,6 @@ from skill_trivium.git import GitCheckoutError, GitCloneError, cloned_repo_at_re
 from skill_trivium.lockfile import (
     LOCKFILE_VERSION,
     exclusive_file_lock,
-    installation_lock,
     load_lockfile,
     write_lockfile_path,
 )
@@ -271,7 +270,7 @@ def create_environment(
 ) -> EnvironmentRecord:
     """Capture the verified current runtime as a canonical manifest."""
     _validate_or_raise(name)
-    with installation_lock(context), _scope_lock(environment_paths(context, scope=scope), scope):
+    with _scope_lock(environment_paths(context, scope=scope), scope):
         snapshot = load_runtime_snapshot(context)
         paths = environment_paths(context, scope=scope)
         _validate_manifest_storage(paths)
@@ -294,7 +293,7 @@ def activate_environment(
     """Materialize a canonical environment manifest into the current runtime."""
     _validate_or_raise(name)
     paths = environment_paths(context, scope=scope)
-    with installation_lock(context), _scope_lock(paths, scope):
+    with _scope_lock(paths, scope):
         state = load_environment_state(context)
         if state.active is not None:
             if state.active == name and state.scope == scope:
@@ -341,34 +340,33 @@ def activate_environment(
 
 def deactivate_environment(context: InstallContext) -> bool:
     """Restore the runtime that preceded environment activation."""
-    with installation_lock(context):
-        state = load_environment_state(context)
-        if state.active is None or state.scope is None:
-            return False
-        paths = environment_paths(context, scope=state.scope)
-        with _scope_lock(paths, state.scope):
-            load_runtime_snapshot(context)
-            previous_path = paths.previous_lockfile_path
-            if not previous_path.is_file() or previous_path.is_symlink():
-                raise EnvironmentError(
-                    title="Missing Previous Runtime",
-                    lines=("The manifest needed to restore the previous runtime is missing.",),
-                )
-            previous = load_lockfile(previous_path, expected_mode=context.mode)
-            previous_content = previous_path.read_bytes()
-            with _materialized_environment(previous) as materialized_skills:
-                with RuntimeMutation(context) as mutation:
-                    _replace_runtime(context, previous, materialized_skills)
-                    if not state.previous_lockfile_present:
-                        context.lockfile_path.unlink(missing_ok=True)
-                    previous_path.unlink()
-                    try:
-                        write_environment_state(context, EnvironmentState())
-                    except BaseException:
-                        _restore_file(previous_path, previous_content)
-                        raise
-                    mutation.commit()
-            return True
+    state = load_environment_state(context)
+    if state.active is None or state.scope is None:
+        return False
+    paths = environment_paths(context, scope=state.scope)
+    with _scope_lock(paths, state.scope):
+        load_runtime_snapshot(context)
+        previous_path = paths.previous_lockfile_path
+        if not previous_path.is_file() or previous_path.is_symlink():
+            raise EnvironmentError(
+                title="Missing Previous Runtime",
+                lines=("The manifest needed to restore the previous runtime is missing.",),
+            )
+        previous = load_lockfile(previous_path, expected_mode=context.mode)
+        previous_content = previous_path.read_bytes()
+        with _materialized_environment(previous) as materialized_skills:
+            with RuntimeMutation(context) as mutation:
+                _replace_runtime(context, previous, materialized_skills)
+                if not state.previous_lockfile_present:
+                    context.lockfile_path.unlink(missing_ok=True)
+                previous_path.unlink()
+                try:
+                    write_environment_state(context, EnvironmentState())
+                except BaseException:
+                    _restore_file(previous_path, previous_content)
+                    raise
+                mutation.commit()
+        return True
 
 
 def remove_environment(
@@ -380,7 +378,7 @@ def remove_environment(
     """Remove one environment manifest from an explicit scope."""
     _validate_or_raise(name)
     paths = environment_paths(context, scope=scope)
-    with installation_lock(context), _scope_lock(paths, scope):
+    with _scope_lock(paths, scope):
         state = load_environment_state(context)
         if state.active == name and state.scope == scope:
             raise EnvironmentError(

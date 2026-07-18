@@ -1,7 +1,5 @@
-"""Verify update locking and post-lock state loading."""
+"""Verify update workflows and runtime restoration."""
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -11,38 +9,6 @@ from skill_trivium.environment import EnvironmentError
 from skill_trivium.lockfile import load_lockfile, write_lockfile
 from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry, SourceUpdateResult
 from skill_trivium.update import run_update
-
-
-def test_run_update_reloads_state_after_acquiring_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reject a requested skill removed while waiting for the mutation lock."""
-    context = _make_context(tmp_path)
-    write_lockfile(context, LockfileData(skills={"alpha": _make_entry("alpha")}))
-
-    @contextmanager
-    def replace_state_while_locking(_context: InstallContext) -> Iterator[None]:
-        write_lockfile(context, LockfileData(skills={"beta": _make_entry("beta")}))
-        yield
-
-    monkeypatch.setattr(update_module, "installation_lock", replace_state_while_locking)
-
-    outcome = run_update(context=context, requested_skills=["alpha"], dry_run=False)
-
-    assert outcome.missing_names == ("alpha",)
-    assert not outcome.lockfile_changed
-
-
-def test_run_update_dry_run_does_not_acquire_mutation_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep read-only update previews outside the mutation lock."""
-    context = _make_context(tmp_path)
-
-    def fail_if_locked(_context: InstallContext) -> None:
-        raise AssertionError("dry-run update acquired the installation lock")
-
-    monkeypatch.setattr(update_module, "installation_lock", fail_if_locked)
-
-    outcome = run_update(context=context, requested_skills=[], dry_run=True)
-
-    assert outcome.nothing_installed
 
 
 def test_run_update_restores_runtime_when_lockfile_write_fails(

@@ -11,7 +11,7 @@ from skill_trivium.environment import (
     sync_active_environment,
 )
 from skill_trivium.git import GitCloneError, cloned_repo
-from skill_trivium.lockfile import installation_lock, load_lockfile, write_lockfile
+from skill_trivium.lockfile import load_lockfile, write_lockfile
 from skill_trivium.models import (
     InstallContext,
     LockfileData,
@@ -68,11 +68,7 @@ def run_update(
     dry_run: bool,
 ) -> UpdateOutcome:
     """Refresh requested lockfile entries from their source repositories."""
-    if dry_run:
-        return _run_update(context=context, requested_skills=requested_skills, dry_run=True)
-
-    with installation_lock(context):
-        return _run_update(context=context, requested_skills=requested_skills, dry_run=False)
+    return _run_update(context=context, requested_skills=requested_skills, dry_run=dry_run)
 
 
 def _run_update(

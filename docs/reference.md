@@ -5,22 +5,28 @@
 The lockfile records the source, commit hash, and metadata for every installed
 skill. It is the source of truth for what is installed and where it came from.
 
-```yaml
-format_version: 2
-skills:
-  pdf-processing:
-    source_url: https://github.com/example/skills.git
-    skills_path: skills/pdf-processing
-    install_path: skills/pdf-processing
-    commit_hash: a1b2c3d4e5f6...
-    description: Extract text from PDF files
-    license: MIT
+```toml
+[meta]
+version = 1
+mode = "project"
+
+[skills]
+
+[skills.pdf-processing]
+source_url = "https://github.com/example/skills.git"
+skills_path = "skills/pdf-processing"
+install_path = ".agents/skills/pdf-processing"
+commit_hash = "a1b2c3d4e5f6..."
+description = "Extract text from PDF files"
+license = "MIT"
 ```
 
 ## Format version
 
 The lockfile format version is validated before any read or write. An
 unexpected version causes a hard error rather than silent migration.
+When the final installed skill is removed, `skills.lock` is removed as well;
+an absent lockfile represents an empty installation.
 
 ## Safety guarantees
 
@@ -49,11 +55,6 @@ If a skill directory exists on disk but is not recorded in the lockfile,
 Lockfile writes use `Path.replace()` so the file is never left in a partially
 written state.
 
-### Installation locks
-
-`trv add`, `trv update`, and `trv remove` acquire an exclusive file lock on
-`skills.lock`. Concurrent invocations are serialised at the filesystem level.
-
 ### `--ignore-validation` behaviour
 
 `--ignore-validation` bypasses Agent Skills Specification validation errors,
@@ -66,9 +67,6 @@ bypass structural and filesystem safety requirements:
 - An existing untracked destination is never overwritten
 
 Compatibility normalisation for `metadata` and `allowed-tools` still applies.
-
-`trv add`, `trv update`, and `trv remove` acquire an exclusive file lock on
-`skills.lock`. Concurrent invocations are serialised at the filesystem level.
 
 ## Metadata normalisation
 

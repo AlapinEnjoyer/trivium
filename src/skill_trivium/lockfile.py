@@ -1,18 +1,23 @@
-"""Load, render, atomically write, and exclusively lock skill lockfiles.
+"""Load, render, and atomically write skill lockfiles.
 
 Lockfiles preserve source revisions, normalized skill metadata, installation
 paths, and content hashes so commands can reproduce and verify the runtime
 without mutating in-memory models during serialization.
 """
 
-import fcntl
 import os
+import sys
 import tomllib
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import BinaryIO, Literal
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 import click
 import tomli_w
@@ -143,24 +148,34 @@ def write_lockfile_path(
 
 
 @contextmanager
-def installation_lock(context: InstallContext) -> Iterator[None]:
-    """Provide an exclusive lockfile-based mutex for the current installation."""
-    lock_path = context.lockfile_path.with_name(f".{context.lockfile_path.name}.lock")
-    with exclusive_file_lock(lock_path):
-        yield
-
-
-@contextmanager
 def exclusive_file_lock(lock_path: Path) -> Iterator[None]:
-    """Acquire and release an exclusive flock on the given path."""
+    """Acquire and release an exclusive lock on the given path."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock_file:
         _lock_file(lock_file)
         try:
             yield
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            _unlock_file(lock_file)
 
 
 def _lock_file(lock_file: BinaryIO) -> None:
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    """Acquire a platform-native exclusive lock."""
+    if sys.platform == "win32":
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(lock_file: BinaryIO) -> None:
+    """Release a platform-native exclusive lock."""
+    if sys.platform == "win32":
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

@@ -84,4 +84,6 @@ trv env deactivate
 trv env remove office
 ```
 
-All `env` subcommands accept `--global` to operate on the global installation.
+Environment commands that manage a manifest (`list`, `create`, `activate`,
+`remove`, and `info`) accept `--global` to operate on the global installation.
+`env deactivate` always restores the active project runtime.

@@ -7,7 +7,6 @@ testable without coupling its core logic to a specific progress renderer.
 """
 
 from collections.abc import Callable
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -22,7 +21,7 @@ from skill_trivium.environment import (
     sync_active_environment,
 )
 from skill_trivium.git import GitCloneError, cloned_repo
-from skill_trivium.lockfile import installation_lock, load_lockfile, write_lockfile
+from skill_trivium.lockfile import load_lockfile, write_lockfile
 from skill_trivium.models import InstallContext, LockfileData, ParsedSkill, SkillLockEntry, ValidationIssue
 from skill_trivium.mutation import RuntimeMutation
 from skill_trivium.skills import (
@@ -103,23 +102,21 @@ def run_add(
 ) -> None:
     """Install selected skills from a remote repository."""
     context = resolve_install_context(global_)
-    lock_context = nullcontext() if dry_run else installation_lock(context)
     try:
-        with lock_context:
-            _run_add(
-                ctx=ctx,
-                url=url,
-                all_=all_,
-                skills=skills,
-                path=path,
-                yes=yes,
-                dry_run=dry_run,
-                ignore_validation=ignore_validation,
-                context=context,
-                progress_factory=progress_factory,
-                is_interactive_terminal=is_interactive_terminal,
-                select_conflict=select_conflict,
-            )
+        _run_add(
+            ctx=ctx,
+            url=url,
+            all_=all_,
+            skills=skills,
+            path=path,
+            yes=yes,
+            dry_run=dry_run,
+            ignore_validation=ignore_validation,
+            context=context,
+            progress_factory=progress_factory,
+            is_interactive_terminal=is_interactive_terminal,
+            select_conflict=select_conflict,
+        )
     except OSError as error:
         console.print(make_panel("err", "Add Failed", [str(error)]))
         raise typer.Exit(code=1) from error

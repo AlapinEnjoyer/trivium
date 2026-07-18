@@ -28,6 +28,7 @@ def test_run_remove_updates_runtime_lockfile_and_active_environment(
     assert outcome.removed == ("alpha",)
     assert outcome.missing == ()
     assert not skill_dir.exists()
+    assert not context.lockfile_path.exists()
     assert load_lockfile(context.lockfile_path, expected_mode="project").skills == {}
     assert synchronized == [context]
 
@@ -63,7 +64,10 @@ def test_run_remove_restores_runtime_when_lockfile_write_fails(
     skill_dir.mkdir(parents=True)
     installed_document = skill_dir / "SKILL.md"
     installed_document.write_text("alpha", encoding="utf-8")
-    write_lockfile(context, LockfileData(skills={"alpha": _make_entry("alpha")}))
+    beta_dir = context.install_path_for("beta")
+    beta_dir.mkdir(parents=True)
+    (beta_dir / "SKILL.md").write_text("beta", encoding="utf-8")
+    write_lockfile(context, LockfileData(skills={"alpha": _make_entry("alpha"), "beta": _make_entry("beta")}))
 
     def failed_write(_context: InstallContext, _lockfile: LockfileData) -> None:
         raise OSError("simulated lockfile failure")
@@ -74,7 +78,7 @@ def test_run_remove_restores_runtime_when_lockfile_write_fails(
         run_remove(context, ["alpha"])
 
     assert installed_document.read_text(encoding="utf-8") == "alpha"
-    assert sorted(load_lockfile(context.lockfile_path, expected_mode="project").skills) == ["alpha"]
+    assert sorted(load_lockfile(context.lockfile_path, expected_mode="project").skills) == ["alpha", "beta"]
 
 
 def test_run_remove_restores_runtime_when_environment_sync_fails(

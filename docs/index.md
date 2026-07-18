@@ -16,11 +16,11 @@ safe:
   commits. Nothing mutates the skill source after installation.
 - **Explicit environment management**: capture the current runtime as a named
   manifest, switch between environments, and keep each one isolated.
-- **Minimal surface area**: a single `trv` binary. No daemons, no
-  long-running processes, no external state beyond the lockfile.
-- **Safety-first defaults**: credential‑bearing URLs are rejected, symlink
+- **Minimal surface area**: a single `trv` binary. No daemons or long-running
+  processes are required.
+- **Safety-first defaults**: credential-bearing URLs are rejected, symlink
   traversal is blocked, untracked skill directories are never silently
-  overwritten, and multi‑step updates are serialised with file‑level locks.
+  overwritten, and lockfile writes are atomic.
 
 ## Quick start
 
@@ -47,5 +47,5 @@ trv env activate office
 ## Project status
 
 trivium is in active use by the author. The CLI, lockfile, and environment
-formats are stable. Breaking changes are reflected in the `skills.lock` format
-version and documented in the changelog.
+formats are evolving. Breaking changes are reflected in the `skills.lock`
+format version and documented in release notes.
