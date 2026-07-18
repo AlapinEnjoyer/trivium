@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "skill-trivium"
-version = "0.2.4"
+version = "0.2.5"
 description = "A minimal CLI for managing AI agent skills"
 readme = "README.md"
 authors = [
@@ -30,7 +30,7 @@ trv = "skill_trivium.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=9.0.1,<10.0.0",
-    "twine>=6.2.0,<7.0.0",
+    "zensical>=0.0.51,<0.0.52",
 ]
 
 [tool.ruff]
@@ -41,17 +41,25 @@ unsafe-fixes = false
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle - basic PEP8 style checks: formatting / style
-    "F",   # pyflakes - errors, unused vars/imports
-    "I",   # isort - Order of imports: standard -> third party -> local
-    "B",   # bugbear - common logic bugs
-    "UP",  # pyupgrade for modern syntax
-    "N",   # PEP8 naming conventions
-    "C4",  # flake8 comprehensions
-    "C90", # complexity check
+    "E",     # pycodestyle - basic PEP8 style checks: formatting / style
+    "F",     # pyflakes - errors, unused vars/imports
+    "I",     # isort - Order of imports: standard -> third party -> local
+    "B",     # bugbear - common logic bugs
+    "UP",    # pyupgrade for modern syntax
+    "N",     # PEP8 naming conventions
+    "C4",    # flake8 comprehensions
+    "C90",   # complexity check
+    "D",     # pydocstyle - docstring enforcement
+    "TID",   # flake8-tidy-imports
+    "ANN",   # flake8-annotations
+    "PTH",   # flake8-use-pathlib
+    "ASYNC", # flake8-async
 ]
 
-ignore = ["E501", "E203", "B008"]
+ignore = ["E501", "E203", "B008", "ANN401", "ANN002", "ANN003", "D417"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.mccabe]
 max-complexity = 40

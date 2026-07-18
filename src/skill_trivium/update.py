@@ -1,3 +1,5 @@
+"""Implement concurrent refreshes of skills recorded in a lockfile."""
+
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -9,7 +11,7 @@ from skill_trivium.environment import (
     sync_active_environment,
 )
 from skill_trivium.git import GitCloneError, cloned_repo
-from skill_trivium.lockfile import write_lockfile
+from skill_trivium.lockfile import load_lockfile, write_lockfile
 from skill_trivium.models import (
     InstallContext,
     LockfileData,
@@ -19,12 +21,14 @@ from skill_trivium.models import (
     UpdateWarning,
     ValidationIssue,
 )
+from skill_trivium.mutation import RuntimeMutation
 from skill_trivium.skills import (
     build_lock_entry,
     hash_parsed_skill,
     hash_skill_directory,
     install_skill_tree,
-    rewrite_normalized_skill_document_if_needed,
+    render_skill_document,
+    resolve_repo_path,
     validate_skill_directory,
 )
 from skill_trivium.ui import console, make_panel, print_validation_issue, progress_bar, shorten_source
@@ -32,39 +36,91 @@ from skill_trivium.ui import console, make_panel, print_validation_issue, progre
 
 @dataclass(slots=True)
 class UpdateOutcome:
+    """Collect update changes, warnings, and the resulting CLI status."""
+
     updated_names: list[str] = field(default_factory=list)
+    refreshed_names: list[str] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
     auth_failure: bool = False
     general_errors: bool = False
     warning_count: int = 0
     lockfile_changed: bool = False
-    runtime_changed: bool = False
+    nothing_installed: bool = False
+    missing_names: tuple[str, ...] = ()
 
     def exit_code(self, *, dry_run: bool) -> int | None:
+        """Return the CLI exit code implied by this outcome."""
         if self.auth_failure:
             return 5
-        if self.validation_issues:
+        if self.validation_issues or self.missing_names:
             return 2
         if self.general_errors:
             return 1
-        if dry_run and self.updated_names:
+        if dry_run and (self.updated_names or self.refreshed_names):
             return 3
         return None
 
 
 def run_update(
     *,
-    lockfile: LockfileData,
     context: InstallContext,
     requested_skills: list[str],
     dry_run: bool,
 ) -> UpdateOutcome:
+    """Refresh requested lockfile entries from their source repositories."""
+    return _run_update(context=context, requested_skills=requested_skills, dry_run=dry_run)
+
+
+def _run_update(
+    *,
+    context: InstallContext,
+    requested_skills: list[str],
+    dry_run: bool,
+) -> UpdateOutcome:
+    lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
+    if not lockfile.skills:
+        return UpdateOutcome(nothing_installed=True)
+
+    missing_names = tuple(name for name in requested_skills if name not in lockfile.skills)
+    if missing_names:
+        return UpdateOutcome(missing_names=missing_names)
+
     ensure_active_environment_runtime_is_clean(context)
     target_entries = {name: lockfile.skills[name] for name in (requested_skills or sorted(lockfile.skills))}
     grouped_entries: dict[str, list[SkillLockEntry]] = defaultdict(list)
     for entry in target_entries.values():
         grouped_entries[entry.source_url].append(entry)
 
+    if dry_run:
+        return _process_update_sources(
+            grouped_entries=grouped_entries,
+            lockfile=lockfile,
+            context=context,
+            dry_run=True,
+        )
+
+    with RuntimeMutation(context) as mutation:
+        outcome = _process_update_sources(
+            grouped_entries=grouped_entries,
+            lockfile=lockfile,
+            context=context,
+            dry_run=False,
+        )
+        if outcome.lockfile_changed:
+            write_lockfile(context, lockfile)
+            sync_active_environment(context)
+        mutation.commit()
+
+    return outcome
+
+
+def _process_update_sources(
+    *,
+    grouped_entries: dict[str, list[SkillLockEntry]],
+    lockfile: LockfileData,
+    context: InstallContext,
+    dry_run: bool,
+) -> UpdateOutcome:
     outcome = UpdateOutcome()
     with progress_bar() as progress:
         future_map = {}
@@ -81,27 +137,23 @@ def run_update(
                 _apply_update_result(
                     lockfile=lockfile,
                     result=result,
-                    source_url=source_url,
                     dry_run=dry_run,
                     outcome=outcome,
                 )
-
-    if outcome.lockfile_changed and not dry_run:
-        write_lockfile(context, lockfile)
-
-    if outcome.runtime_changed and not dry_run:
-        sync_active_environment(context)
 
     return outcome
 
 
 def render_update_summary(outcome: UpdateOutcome, *, dry_run: bool) -> None:
-    if dry_run and outcome.updated_names:
+    """Render the user-facing summary for an update operation."""
+    if dry_run and (outcome.updated_names or outcome.refreshed_names):
+        lines = [f"Would update skill '{name}'." for name in sorted(outcome.updated_names)]
+        lines.extend(f"Would refresh lockfile metadata for skill '{name}'." for name in sorted(outcome.refreshed_names))
         console.print(
             make_panel(
                 "info",
                 "Dry Run",
-                [f"Would update skill '{name}'." for name in sorted(outcome.updated_names)],
+                lines,
             )
         )
         return
@@ -129,7 +181,6 @@ def _apply_update_result(
     *,
     lockfile: LockfileData,
     result: SourceUpdateResult,
-    source_url: str,
     dry_run: bool,
     outcome: UpdateOutcome,
 ) -> None:
@@ -155,11 +206,11 @@ def _apply_update_result(
         console.print(make_panel("err", "Update Failed", [error]))
 
     outcome.auth_failure = outcome.auth_failure or result.auth_failure
-    outcome.runtime_changed = outcome.runtime_changed or bool(result.rewritten)
-
     for skill_name, refreshed_entry in sorted(result.refreshed.items()):
-        lockfile.skills[skill_name] = refreshed_entry
+        outcome.refreshed_names.append(skill_name)
         outcome.lockfile_changed = True
+        if not dry_run:
+            lockfile.skills[skill_name] = refreshed_entry
 
     if dry_run:
         outcome.updated_names.extend(sorted(result.updated))
@@ -169,7 +220,6 @@ def _apply_update_result(
         lockfile.skills[skill_name] = new_entry
         outcome.updated_names.append(skill_name)
         outcome.lockfile_changed = True
-        outcome.runtime_changed = True
 
 
 def _update_source_group(
@@ -182,13 +232,13 @@ def _update_source_group(
         source_url = entries[0].source_url
         with cloned_repo(source_url) as (repo_path, commit_hash):
             for entry in entries:
-                container = repo_path if entry.skills_path == "." else repo_path / entry.skills_path
-                if not container.is_dir():
+                container = repo_path if entry.skills_path == "." else resolve_repo_path(repo_path, entry.skills_path)
+                if container is None or not container.is_dir():
                     result.warnings.append(
                         UpdateWarning(
                             skill_name=entry.name,
                             message=f"The registered skills path '{entry.skills_path}' no longer exists for this skill.",
-                            guidance=f"Re-run `trivium add {source_url}` if the skill moved elsewhere in the repository.",
+                            guidance=f"Re-run `trv add {source_url}` if the skill moved elsewhere in the repository.",
                         )
                     )
                     continue
@@ -199,7 +249,7 @@ def _update_source_group(
                         UpdateWarning(
                             skill_name=entry.name,
                             message=f"The skill was not found at '{entry.skills_path}/{entry.name}'.",
-                            guidance=f"Re-run `trivium add {source_url}` if the skill moved elsewhere in the repository.",
+                            guidance=f"Re-run `trv add {source_url}` if the skill moved elsewhere in the repository.",
                         )
                     )
                     continue
@@ -211,23 +261,10 @@ def _update_source_group(
 
                 destination = context.install_path_for(entry.name)
                 if parsed_skill and not _entry_needs_refresh(entry, parsed_skill, destination):
-                    if not dry_run:
-                        try:
-                            if rewrite_normalized_skill_document_if_needed(parsed_skill, destination):
-                                result.rewritten.add(parsed_skill.name)
-                                # Use extend with a generator to avoid a manual loop
-                                result.warnings.extend(
-                                    UpdateWarning(skill_name=parsed_skill.name, message=warning)
-                                    for warning in parsed_skill.warnings
-                                )
-                        except OSError as error:
-                            result.errors.append(f"{entry.name}: {error}")
-                            continue
-
                     needs_lock_update = entry.content_hash is None or entry.commit_hash != commit_hash
 
                     if needs_lock_update:
-                        result.refreshed[entry.name] = build_lock_entry(
+                        refreshed_entry = build_lock_entry(
                             parsed_skill=parsed_skill,
                             source_url=entry.source_url,
                             commit_hash=commit_hash,
@@ -235,6 +272,7 @@ def _update_source_group(
                             context=context,
                             installed_at=entry.installed_at,
                         )
+                        result.refreshed[entry.name] = refreshed_entry
 
                     continue
 
@@ -248,14 +286,10 @@ def _update_source_group(
                         installed_at=entry.installed_at,
                     )
                     if not dry_run:
-                        try:
-                            ensure_storage(context)
-                            install_skill_tree(parsed_skill, destination)
-                            for warning in parsed_skill.warnings:
-                                result.warnings.append(UpdateWarning(skill_name=parsed_skill.name, message=warning))
-                        except OSError as error:
-                            result.errors.append(f"{entry.name}: {error}")
-                            continue
+                        ensure_storage(context)
+                        install_skill_tree(parsed_skill, destination)
+                        for warning in parsed_skill.warnings:
+                            result.warnings.append(UpdateWarning(skill_name=parsed_skill.name, message=warning))
                     result.updated[entry.name] = updated_entry
     except GitCloneError as error:
         result.auth_failure = error.auth_failure
@@ -268,11 +302,17 @@ def _update_source_group(
 
 
 def _entry_needs_refresh(entry: SkillLockEntry, parsed_skill: ParsedSkill, destination: Path) -> bool:
-    expected_hash = hash_parsed_skill(parsed_skill)
+    if destination.is_symlink():
+        return True
     if entry.content_hash is None:
         if not destination.is_dir():
             return True
-        return hash_skill_directory(destination) != expected_hash
-    if expected_hash != entry.content_hash:
-        return True
-    return not destination.is_dir()
+        return hash_skill_directory(destination) != hash_parsed_skill(parsed_skill)
+    return (
+        hash_skill_directory(
+            parsed_skill.directory,
+            skill_document=render_skill_document(parsed_skill.frontmatter, parsed_skill.body),
+        )
+        != entry.content_hash
+        or not destination.is_dir()
+    )

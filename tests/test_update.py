@@ -1,3 +1,9 @@
+"""Verify update exit-code precedence and source-group failure handling.
+
+The cases protect dry-run semantics, runtime-change tracking, and preservation
+of authentication failures returned by repository operations.
+"""
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -6,11 +12,12 @@ import pytest
 
 import skill_trivium.update as update_module
 from skill_trivium.git import GitCloneError
-from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry, SourceUpdateResult, ValidationIssue
+from skill_trivium.models import InstallContext, SkillLockEntry, ValidationIssue
 from skill_trivium.update import UpdateOutcome
 
 
 def make_context(tmp_path: Path) -> InstallContext:
+    """Build a project installation context for update tests."""
     return InstallContext(
         mode="project",
         base_dir=tmp_path,
@@ -21,11 +28,12 @@ def make_context(tmp_path: Path) -> InstallContext:
 
 
 def make_entry(name: str = "alpha") -> SkillLockEntry:
+    """Build a representative update lock entry."""
     return SkillLockEntry(
         name=name,
         source_url="https://git.example.com/private/repo.git",
-        commit_hash="abc123",
-        content_hash="hash",
+        commit_hash="a" * 7,
+        content_hash="b" * 64,
         skills_path="skills",
         install_path=f".agents/skills/{name}",
         description="Alpha",
@@ -52,28 +60,15 @@ def make_entry(name: str = "alpha") -> SkillLockEntry:
     ],
 )
 def test_update_outcome_exit_code_precedence(outcome: UpdateOutcome, dry_run: bool, expected: int | None) -> None:
+    """Choose the highest-priority update exit code."""
     assert outcome.exit_code(dry_run=dry_run) == expected
-
-
-def test_apply_update_result_marks_normalization_rewrite_as_runtime_change() -> None:
-    outcome = UpdateOutcome()
-
-    update_module._apply_update_result(
-        lockfile=LockfileData(),
-        result=SourceUpdateResult(rewritten={"alpha"}),
-        source_url="https://git.example.com/repo.git",
-        dry_run=False,
-        outcome=outcome,
-    )
-
-    assert outcome.runtime_changed is True
-    assert outcome.updated_names == []
 
 
 def test_update_source_group_preserves_authentication_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Preserve authentication failures while updating a source group."""
     entry = make_entry()
 
     @contextmanager

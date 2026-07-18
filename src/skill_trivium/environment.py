@@ -1,139 +1,233 @@
+"""Manage project and global environment manifests."""
+
+import os
 import shutil
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Literal
 
 import tomli_w
 
 from skill_trivium.git import GitCheckoutError, GitCloneError, cloned_repo_at_revision
-from skill_trivium.lockfile import LOCKFILE_VERSION, load_lockfile, write_lockfile, write_lockfile_path
-from skill_trivium.models import InstallContext, LockfileData
+from skill_trivium.lockfile import (
+    LOCKFILE_VERSION,
+    exclusive_file_lock,
+    load_lockfile,
+    write_lockfile_path,
+)
+from skill_trivium.models import InstallContext, LockfileData, SkillLockEntry
+from skill_trivium.mutation import RuntimeMutation
 from skill_trivium.skills import (
     MAX_NAME_LENGTH,
     NAME_PATTERN,
     hash_skill_directory,
     install_skill_tree,
+    render_skill_document,
+    resolve_repo_path,
     utc_now,
     validate_skill_directory,
 )
 
 TRIVIUM_HOME_DIR = ".trivium"
-PROJECTS_DIR = "projects"
-GLOBAL_DIR = "global"
-ENVS_DIR = "envs"
-DEFAULT_DIR = "default"
+ENVIRONMENTS_DIR = "environments"
+SESSIONS_DIR = "sessions"
 STATE_FILE = "state.toml"
-LOCKFILE_NAME = "skills.lock"
-SHARED_ENVS_DIR = "environments"
+PREVIOUS_LOCKFILE = "previous.lock"
 EnvironmentScope = Literal["project", "global"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class EnvironmentError(Exception):
+    """Describe an environment operation failure for CLI rendering."""
+
     title: str
     lines: tuple[str, ...]
     exit_code: int = 1
     kind: str = "err"
 
     def __str__(self) -> str:
+        """Return the environment error messages as one string."""
         return " ".join(self.lines)
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentPaths:
-    state_path: Path
-    default_dir: Path
-    envs_dir: Path
-    shared_envs_dir: Path | None
+    """Store canonical manifest and runtime-session paths."""
 
-    def env_dir(self, name: str) -> Path:
-        return self.envs_dir / name
+    manifests_dir: Path
+    state_path: Path
+    previous_lockfile_path: Path
+    lock_path: Path
+
+    def manifest_path(self, name: str) -> Path:
+        """Return the canonical manifest path for an environment name."""
+        _validate_or_raise(name)
+        return self.manifests_dir / f"{name}.lock"
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentState:
+    """Identify the active manifest and the runtime it replaced."""
+
     active: str | None = None
+    scope: EnvironmentScope | None = None
+    revision: str | None = None
+    previous_lockfile_present: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentRecord:
+    """Summarize one environment manifest."""
+
     name: str
     active: bool
-    local: bool
-    shared: bool
     skill_count: int
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentDetails:
+    """Describe one environment manifest."""
+
     name: str
+    scope: EnvironmentScope
     active: bool
-    local: bool
-    shared: bool
     skill_names: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeSnapshot:
+    """Represent a verified runtime lockfile and skill tree."""
+
+    lockfile: LockfileData
+    lockfile_present: bool
+
+
 def validate_environment_name(name: str) -> str | None:
+    """Return a validation error for an environment name, if invalid."""
     if not 1 <= len(name) <= MAX_NAME_LENGTH:
         return f"Environment names must be between 1 and {MAX_NAME_LENGTH} characters."
-    if name.strip() != name:
-        return "Environment names may not have surrounding whitespace."
-    if any(character.isupper() for character in name):
+    if name.strip() != name or any(character.isupper() for character in name):
         return "Environment names may only use lowercase letters, digits, and single hyphens."
-
     if NAME_PATTERN.fullmatch(name) is None:
         return "Environment names may only use lowercase letters, digits, and single hyphens."
     return None
 
 
+def environment_paths(context: InstallContext, *, scope: EnvironmentScope) -> EnvironmentPaths:
+    """Resolve canonical manifests and transient state for a runtime."""
+    home = Path.home() / TRIVIUM_HOME_DIR
+    manifests_dir = home / ENVIRONMENTS_DIR if scope == "global" else context.base_dir / ".agents" / ENVIRONMENTS_DIR
+    session_dir = home / SESSIONS_DIR / sha256(context.base_dir.resolve().as_posix().encode()).hexdigest()
+    return EnvironmentPaths(
+        manifests_dir=manifests_dir,
+        state_path=session_dir / STATE_FILE,
+        previous_lockfile_path=session_dir / PREVIOUS_LOCKFILE,
+        lock_path=manifests_dir.parent / f".{ENVIRONMENTS_DIR}.lock",
+    )
+
+
 def active_environment_name(context: InstallContext) -> str | None:
+    """Return the active environment name for a runtime."""
     return load_environment_state(context).active
 
 
 def load_environment_state(context: InstallContext) -> EnvironmentState:
-    state_path = environment_paths(context, scope=context.mode).state_path
+    """Load the active environment session for a runtime."""
+    state_path = environment_paths(context, scope="project").state_path
+    if state_path.is_symlink():
+        raise EnvironmentError(
+            title="Invalid Environment State",
+            lines=(f"The environment state file '{state_path}' must not be a symbolic link.",),
+            exit_code=2,
+        )
     if not state_path.exists():
         return EnvironmentState()
-
-    with state_path.open("rb") as file:
-        payload = tomllib.load(file)
+    try:
+        with state_path.open("rb") as file:
+            payload = tomllib.load(file)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise EnvironmentError(
+            title="Invalid Environment State",
+            lines=(f"The environment state file '{state_path}' is malformed.",),
+            exit_code=2,
+        ) from error
 
     active = payload.get("active")
-    return EnvironmentState(active=active if isinstance(active, str) and active else None)
+    scope = payload.get("scope")
+    revision = payload.get("revision")
+    previous_present = payload.get("previous_lockfile_present")
+    if (
+        not isinstance(active, str)
+        or validate_environment_name(active) is not None
+        or scope not in {"project", "global"}
+        or not isinstance(revision, str)
+        or len(revision) != 64
+        or type(previous_present) is not bool
+    ):
+        raise EnvironmentError(
+            title="Invalid Environment State",
+            lines=(f"The environment state file '{state_path}' contains invalid values.",),
+            exit_code=2,
+        )
+    return EnvironmentState(
+        active=active,
+        scope=scope,
+        revision=revision,
+        previous_lockfile_present=previous_present,
+    )
 
 
 def write_environment_state(context: InstallContext, state: EnvironmentState) -> None:
-    state_path = environment_paths(context, scope=context.mode).state_path
+    """Persist or clear the active environment session."""
+    state_path = environment_paths(context, scope="project").state_path
     if state.active is None:
-        if state_path.exists():
-            state_path.unlink()
+        state_path.unlink(missing_ok=True)
         return
+    if state.scope is None or state.revision is None:
+        raise ValueError("Active environment state requires scope and revision.")
+    _validate_or_raise(state.active)
+    _write_bytes(
+        state_path,
+        tomli_w.dumps(
+            {
+                "active": state.active,
+                "scope": state.scope,
+                "revision": state.revision,
+                "previous_lockfile_present": state.previous_lockfile_present,
+            }
+        ).encode(),
+    )
 
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(tomli_w.dumps({"active": state.active}), encoding="utf-8")
 
-
-def list_environments(context: InstallContext, *, scope: EnvironmentScope | None = None) -> list[EnvironmentRecord]:
-    env_scope = scope or context.mode
-    paths = environment_paths(context, scope=env_scope)
+def list_environments(
+    context: InstallContext,
+    *,
+    scope: EnvironmentScope = "project",
+) -> list[EnvironmentRecord]:
+    """List environment manifests in one explicit scope."""
+    paths = environment_paths(context, scope=scope)
+    _validate_manifest_storage(paths)
     state = load_environment_state(context)
-    active_name = state.active if env_scope == context.mode else None
-    names = set(_local_environment_names(paths))
-    names.update(_shared_environment_names(paths))
-
-    records: list[EnvironmentRecord] = []
-    for name in sorted(names):
-        lockfile = _load_preferred_environment_lockfile(paths, name)
+    if not paths.manifests_dir.is_dir():
+        return []
+    records = []
+    for manifest_path in sorted(paths.manifests_dir.glob("*.lock")):
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            continue
+        name = manifest_path.stem
+        if validate_environment_name(name) is not None:
+            continue
+        manifest = _load_manifest(paths, name, scope)
         records.append(
             EnvironmentRecord(
                 name=name,
-                active=name == active_name,
-                local=paths.env_dir(name).is_dir(),
-                shared=_shared_environment_path(paths, name) is not None,
-                skill_count=len(lockfile.skills),
+                active=state.active == name and state.scope == scope,
+                skill_count=len(manifest.skills),
             )
         )
     return records
@@ -143,26 +237,28 @@ def describe_environment(
     context: InstallContext,
     name: str | None = None,
     *,
-    scope: EnvironmentScope | None = None,
+    scope: EnvironmentScope = "project",
 ) -> EnvironmentDetails | None:
+    """Return details for a named or active environment manifest."""
     state = load_environment_state(context)
-    target_name = name or state.active
+    if name is None and state.active is not None and state.scope is not None:
+        target_name = state.active
+        scope = state.scope
+    else:
+        target_name = name
     if target_name is None:
         return None
-
-    paths = environment_paths(context, scope=scope or context.mode)
-    local = paths.env_dir(target_name).is_dir()
-    shared = _shared_environment_path(paths, target_name) is not None
-    if not local and not shared:
+    _validate_or_raise(target_name)
+    paths = environment_paths(context, scope=scope)
+    manifest_path = paths.manifest_path(target_name)
+    if not manifest_path.exists():
         return None
-
-    lockfile = _load_preferred_environment_lockfile(paths, target_name)
+    manifest = _load_manifest(paths, target_name, scope)
     return EnvironmentDetails(
         name=target_name,
-        active=(scope or context.mode) == context.mode and target_name == state.active,
-        local=local,
-        shared=shared,
-        skill_names=tuple(sorted(lockfile.skills)),
+        scope=scope,
+        active=state.active == target_name and state.scope == scope,
+        skill_names=tuple(sorted(manifest.skills)),
     )
 
 
@@ -170,629 +266,455 @@ def create_environment(
     context: InstallContext,
     *,
     name: str,
-    empty: bool,
-    shared: bool,
-    scope: EnvironmentScope | None = None,
+    scope: EnvironmentScope = "project",
 ) -> EnvironmentRecord:
+    """Capture the verified current runtime as a canonical manifest."""
     _validate_or_raise(name)
-    env_scope = scope or context.mode
-    paths = environment_paths(context, scope=env_scope)
-    if shared and paths.shared_envs_dir is None:
-        raise EnvironmentError(
-            title="Shared Environments Unsupported",
-            lines=("Shared environments are only available in project mode.",),
-            exit_code=2,
-        )
-    local_dir = paths.env_dir(name)
-    shared_path = _shared_environment_file(paths, name)
-    local_exists = local_dir.is_dir()
-    shared_exists = shared_path is not None and shared_path.exists()
-
-    if empty and local_exists:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The environment '{name}' already exists locally.",),
-        )
-
-    if empty and shared and shared_exists:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The shared environment '{name}' already exists.",),
-        )
-
-    if empty:
-        lockfile = LockfileData()
-        _write_environment_snapshot(
-            local_dir,
-            lockfile=lockfile,
-            create_skills_dir=True,
-            environment_name=name,
-            mode=context.mode,
-        )
-        if shared:
-            _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
-        return _build_environment_record(paths, name, active=env_scope == context.mode and False)
-
-    if local_exists and not shared:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The environment '{name}' already exists locally.",),
-        )
-
-    if local_exists and shared_exists:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The environment '{name}' already exists locally and as a shared definition.",),
-        )
-
-    if shared_exists and not local_exists:
-        raise EnvironmentError(
-            title="Environment Exists",
-            lines=(f"The shared environment '{name}' already exists.",),
-        )
-
-    if local_exists and shared and not shared_exists:
-        lockfile = load_lockfile(local_dir / LOCKFILE_NAME)
-        _write_shared_definition(context, name=name, lockfile=lockfile, scope=env_scope)
-        return _build_environment_record(
-            paths,
-            name,
-            active=env_scope == context.mode and load_environment_state(context).active == name,
-        )
-
-    capture_context = context if context.mode == "project" else _project_capture_context(context)
-    snapshot = load_runtime_snapshot(capture_context, require_content_hashes=True)
-    _write_environment_snapshot(
-        local_dir,
-        lockfile=snapshot.lockfile,
-        create_skills_dir=True,
-        environment_name=name,
-        mode=capture_context.mode,
-    )
-    _copy_directory(snapshot.skills_dir, local_dir / "skills")
-    if shared:
-        _write_shared_definition(context, name=name, lockfile=snapshot.lockfile, scope=env_scope)
-    return _build_environment_record(
-        paths,
-        name,
-        active=env_scope == context.mode and load_environment_state(context).active == name,
-    )
+    with _scope_lock(environment_paths(context, scope=scope), scope):
+        snapshot = load_runtime_snapshot(context)
+        paths = environment_paths(context, scope=scope)
+        _validate_manifest_storage(paths)
+        manifest_path = paths.manifest_path(name)
+        if manifest_path.exists() or manifest_path.is_symlink():
+            raise EnvironmentError(
+                title="Environment Exists",
+                lines=(f"The {scope} environment '{name}' already exists.",),
+            )
+        _write_manifest(manifest_path, snapshot.lockfile, name=name, scope=scope)
+        return EnvironmentRecord(name=name, active=False, skill_count=len(snapshot.lockfile.skills))
 
 
-def activate_environment(context: InstallContext, name: str) -> None:
+def activate_environment(
+    context: InstallContext,
+    name: str,
+    *,
+    scope: EnvironmentScope = "project",
+) -> None:
+    """Materialize a canonical environment manifest into the current runtime."""
     _validate_or_raise(name)
-    paths = environment_paths(context, scope=context.mode)
-    state = load_environment_state(context)
-    if state.active == name:
-        raise EnvironmentError(
-            title="Environment Already Active",
-            lines=(f"The environment '{name}' is already active.",),
-            kind="info",
-        )
+    paths = environment_paths(context, scope=scope)
+    with _scope_lock(paths, scope):
+        state = load_environment_state(context)
+        if state.active is not None:
+            if state.active == name and state.scope == scope:
+                raise EnvironmentError(
+                    title="Environment Already Active",
+                    lines=(f"The {scope} environment '{name}' is already active.",),
+                    kind="info",
+                )
+            raise EnvironmentError(
+                title="Environment Already Active",
+                lines=("Deactivate the current environment before activating another one.",),
+                exit_code=2,
+            )
 
-    _ensure_environment_available(context, name)
-    if state.active is None:
-        default_snapshot = load_runtime_snapshot(context, require_content_hashes=True)
-        _write_snapshot_dir(
-            paths.default_dir,
-            lockfile=default_snapshot.lockfile,
-            source_skills_dir=default_snapshot.skills_dir,
-            write_lockfile=default_snapshot.lockfile_present,
-            create_skills_dir=default_snapshot.skills_dir.exists(),
-            environment_name=None,
-            mode=context.mode,
-        )
-    else:
-        sync_active_environment(context)
+        current = load_runtime_snapshot(context)
+        manifest = _load_manifest(paths, name, scope)
+        revision = _manifest_revision(paths.manifest_path(name))
+        previous_path = paths.previous_lockfile_path
+        previous_content = previous_path.read_bytes() if previous_path.exists() else None
 
-    _restore_snapshot(paths.env_dir(name), context)
-    write_environment_state(context, EnvironmentState(active=name))
+        with _materialized_environment(manifest) as materialized_skills:
+            try:
+                write_lockfile_path(
+                    previous_path,
+                    current.lockfile,
+                    meta_updates={"version": LOCKFILE_VERSION, "mode": context.mode},
+                )
+                with RuntimeMutation(context) as mutation:
+                    _replace_runtime(context, manifest, materialized_skills)
+                    write_environment_state(
+                        context,
+                        EnvironmentState(
+                            active=name,
+                            scope=scope,
+                            revision=revision,
+                            previous_lockfile_present=current.lockfile_present,
+                        ),
+                    )
+                    mutation.commit()
+            except BaseException:
+                _restore_file(previous_path, previous_content)
+                raise
 
 
 def deactivate_environment(context: InstallContext) -> bool:
-    paths = environment_paths(context, scope=context.mode)
+    """Restore the runtime that preceded environment activation."""
     state = load_environment_state(context)
-    if state.active is None:
+    if state.active is None or state.scope is None:
         return False
-
-    sync_active_environment(context)
-    if not paths.default_dir.is_dir():
-        raise EnvironmentError(
-            title="Missing Default Snapshot",
-            lines=(
-                "The original runtime snapshot is missing.",
-                "Remove the active environment state or recreate the environment locally before deactivating.",
-            ),
-        )
-
-    _restore_snapshot(paths.default_dir, context)
-    write_environment_state(context, EnvironmentState())
-    return True
-
-
-def deactivate_environment_without_sync(context: InstallContext) -> bool:
-    paths = environment_paths(context, scope=context.mode)
-    state = load_environment_state(context)
-    if state.active is None:
-        return False
-
-    if not paths.default_dir.is_dir():
-        raise EnvironmentError(
-            title="Missing Default Snapshot",
-            lines=(
-                "The original runtime snapshot is missing.",
-                "Remove the active environment state or recreate the environment locally before deactivating.",
-            ),
-        )
-
-    _restore_snapshot(paths.default_dir, context)
-    write_environment_state(context, EnvironmentState())
-    return True
+    paths = environment_paths(context, scope=state.scope)
+    with _scope_lock(paths, state.scope):
+        load_runtime_snapshot(context)
+        previous_path = paths.previous_lockfile_path
+        if not previous_path.is_file() or previous_path.is_symlink():
+            raise EnvironmentError(
+                title="Missing Previous Runtime",
+                lines=("The manifest needed to restore the previous runtime is missing.",),
+            )
+        previous = load_lockfile(previous_path, expected_mode=context.mode)
+        previous_content = previous_path.read_bytes()
+        with _materialized_environment(previous) as materialized_skills:
+            with RuntimeMutation(context) as mutation:
+                _replace_runtime(context, previous, materialized_skills)
+                if not state.previous_lockfile_present:
+                    context.lockfile_path.unlink(missing_ok=True)
+                previous_path.unlink()
+                try:
+                    write_environment_state(context, EnvironmentState())
+                except BaseException:
+                    _restore_file(previous_path, previous_content)
+                    raise
+                mutation.commit()
+        return True
 
 
 def remove_environment(
     context: InstallContext,
     name: str,
     *,
-    scope: EnvironmentScope | None = None,
-) -> tuple[bool, bool, bool]:
+    scope: EnvironmentScope = "project",
+) -> None:
+    """Remove one environment manifest from an explicit scope."""
     _validate_or_raise(name)
-    env_scope = scope or context.mode
-    paths = environment_paths(context, scope=env_scope)
-    local_path = paths.env_dir(name)
-    shared_path = _shared_environment_path(paths, name)
-    local_exists = local_path.is_dir()
-    shared_exists = shared_path is not None
-    if not local_exists and not shared_exists:
-        raise EnvironmentError(
-            title="Environment Not Found",
-            lines=(f"No local or shared environment named '{name}' was found.",),
-            exit_code=2,
-        )
-
-    was_active = env_scope == context.mode and active_environment_name(context) == name
-    if was_active:
-        deactivate_environment_without_sync(context)
-
-    if local_exists:
-        shutil.rmtree(local_path)
-    if shared_path is not None and shared_path.exists():
-        shared_path.unlink()
-    return was_active, local_exists, shared_exists
+    paths = environment_paths(context, scope=scope)
+    with _scope_lock(paths, scope):
+        state = load_environment_state(context)
+        if state.active == name and state.scope == scope:
+            raise EnvironmentError(
+                title="Environment Is Active",
+                lines=("Deactivate the environment before removing it.",),
+                exit_code=2,
+            )
+        manifest_path = paths.manifest_path(name)
+        if not manifest_path.exists():
+            raise EnvironmentError(
+                title="Environment Not Found",
+                lines=(f"No {scope} environment named '{name}' was found.",),
+                exit_code=2,
+            )
+        _load_manifest(paths, name, scope)
+        manifest_path.unlink()
 
 
 def ensure_active_environment_runtime_is_clean(context: InstallContext) -> str | None:
-    active = active_environment_name(context)
-    if active is None:
+    """Verify that the active manifest and runtime still match."""
+    state = load_environment_state(context)
+    if state.active is None or state.scope is None or state.revision is None:
         return None
-    load_runtime_snapshot(context, require_content_hashes=True)
-    return active
-
-
-def ensure_environment_init_allowed(context: InstallContext) -> None:
-    active = active_environment_name(context)
-    if active is None:
-        return
-    raise EnvironmentError(
-        title="Init Blocked While Environment Is Active",
-        lines=(
-            f"The environment '{active}' is active.",
-            "`trv init` creates unmanaged local skills, so deactivate the environment first.",
-        ),
-        exit_code=2,
-    )
+    paths = environment_paths(context, scope=state.scope)
+    with _scope_lock(paths, state.scope):
+        manifest = _load_current_manifest(paths, state)
+        runtime = load_runtime_snapshot(context)
+        if not _lockfile_entries_match(runtime.lockfile, manifest):
+            raise EnvironmentError(
+                title="Active Environment Is Out Of Sync",
+                lines=("Reactivate the environment before modifying its runtime.",),
+                exit_code=2,
+            )
+    return state.active
 
 
 def sync_active_environment(context: InstallContext) -> str | None:
-    active = active_environment_name(context)
-    if active is None:
+    """Persist the current runtime to its active canonical manifest."""
+    state = load_environment_state(context)
+    if state.active is None or state.scope is None or state.revision is None:
         return None
-
-    paths = environment_paths(context, scope=context.mode)
-    local_dir = paths.env_dir(active)
-    if not local_dir.is_dir():
-        raise EnvironmentError(
-            title="Missing Environment Snapshot",
-            lines=(
-                f"The active environment '{active}' is missing from local storage.",
-                "Deactivate the environment or recreate it before continuing.",
-            ),
-        )
-
-    snapshot = load_runtime_snapshot(context, require_content_hashes=True)
-    _write_snapshot_dir(
-        local_dir,
-        lockfile=snapshot.lockfile,
-        source_skills_dir=snapshot.skills_dir,
-        write_lockfile=True,
-        create_skills_dir=True,
-        environment_name=active,
-        mode=context.mode,
-    )
-    _rewrite_runtime_lockfile(context, snapshot.lockfile, environment_name=active)
-    if _shared_environment_path(paths, active) is not None:
-        _write_shared_definition(context, name=active, lockfile=snapshot.lockfile, scope=context.mode)
-    return active
+    paths = environment_paths(context, scope=state.scope)
+    with _scope_lock(paths, state.scope):
+        manifest_path = paths.manifest_path(state.active)
+        _load_current_manifest(paths, state)
+        runtime = load_runtime_snapshot(context)
+        manifest_content = manifest_path.read_bytes()
+        state_content = paths.state_path.read_bytes()
+        try:
+            _write_manifest(manifest_path, runtime.lockfile, name=state.active, scope=state.scope)
+            revision = _manifest_revision(manifest_path)
+            write_environment_state(
+                context,
+                replace(state, revision=revision),
+            )
+        except BaseException:
+            _restore_file(manifest_path, manifest_content)
+            _restore_file(paths.state_path, state_content)
+            raise
+    return state.active
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeSnapshot:
-    lockfile: LockfileData
-    skills_dir: Path
-    lockfile_present: bool
-
-
-def load_runtime_snapshot(context: InstallContext, *, require_content_hashes: bool) -> RuntimeSnapshot:
+def load_runtime_snapshot(context: InstallContext) -> RuntimeSnapshot:
+    """Load and verify a managed runtime before an environment operation."""
     lockfile_present = context.lockfile_path.exists()
     lockfile = load_lockfile(context.lockfile_path, expected_mode=context.mode)
-    skills_dir = context.skills_dir
+    _validate_skill_tree(
+        lockfile,
+        context.skills_dir,
+        lockfile_name=context.lockfile_path.name,
+    )
+    return RuntimeSnapshot(lockfile=lockfile, lockfile_present=lockfile_present)
+
+
+def _validate_skill_tree(
+    lockfile: LockfileData,
+    skills_dir: Path,
+    *,
+    lockfile_name: str,
+) -> None:
     managed_names = set(lockfile.skills)
-    if skills_dir.exists():
-        unmanaged = sorted(
-            child.name for child in skills_dir.iterdir() if child.is_dir() and child.name not in managed_names
+    if skills_dir.is_symlink():
+        raise EnvironmentError(
+            title="Unsafe Skill Tree",
+            lines=(f"The skill tree '{skills_dir}' is a symbolic link.",),
+            exit_code=2,
         )
+    if skills_dir.exists():
+        unmanaged = sorted(child.name for child in skills_dir.iterdir() if child.name not in managed_names)
         if unmanaged:
-            formatted = ", ".join(unmanaged)
             raise EnvironmentError(
                 title="Unmanaged Skills Detected",
-                lines=(
-                    f"The runtime contains skill directories that are not tracked in {context.lockfile_path.name}: {formatted}.",
-                    "Only lockfile-managed skills can be captured into an environment.",
-                ),
+                lines=(f"The skill tree contains entries not tracked in {lockfile_name}: {', '.join(unmanaged)}.",),
                 exit_code=2,
             )
-
-    missing = sorted(name for name in managed_names if not context.install_path_for(name).is_dir())
+    missing = sorted(
+        name for name in managed_names if (skills_dir / name).is_symlink() or not (skills_dir / name).is_dir()
+    )
     if missing:
-        formatted = ", ".join(missing)
         raise EnvironmentError(
             title="Missing Installed Skills",
-            lines=(
-                f"The lockfile references skills that are missing on disk: {formatted}.",
-                "Run `trv update` or remove the broken skills before using environments.",
-            ),
+            lines=(f"The lockfile references missing skills: {', '.join(missing)}.",),
             exit_code=2,
         )
-
-    if require_content_hashes:
-        missing_hashes = sorted(name for name, entry in lockfile.skills.items() if entry.content_hash is None)
-        if missing_hashes:
-            formatted = ", ".join(missing_hashes)
-            raise EnvironmentError(
-                title="Lockfile Missing Content Hashes",
-                lines=(
-                    f"The runtime lockfile does not have content hashes for: {formatted}.",
-                    "Run `trv update` first so trivium can verify the runtime before capturing an environment.",
-                ),
-                exit_code=2,
-            )
-
-    dirty = []
-    for name, entry in sorted(lockfile.skills.items()):
-        if entry.content_hash is None:
-            continue
-        if hash_skill_directory(context.install_path_for(name)) != entry.content_hash:
-            dirty.append(name)
+    missing_hashes = sorted(name for name, entry in lockfile.skills.items() if entry.content_hash is None)
+    if missing_hashes:
+        raise EnvironmentError(
+            title="Lockfile Missing Content Hashes",
+            lines=(f"The lockfile does not have content hashes for: {', '.join(missing_hashes)}.",),
+            exit_code=2,
+        )
+    dirty = [
+        name
+        for name, entry in sorted(lockfile.skills.items())
+        if entry.content_hash is not None and hash_skill_directory(skills_dir / name) != entry.content_hash
+    ]
     if dirty:
-        formatted = ", ".join(dirty)
         raise EnvironmentError(
             title="Runtime Has Local Modifications",
-            lines=(
-                f"The installed skills differ from the recorded lockfile hashes: {formatted}.",
-                "Update or reinstall those skills before capturing or switching environments.",
-            ),
+            lines=(f"The skill tree differs from its lockfile hashes: {', '.join(dirty)}.",),
             exit_code=2,
         )
 
-    return RuntimeSnapshot(lockfile=lockfile, skills_dir=skills_dir, lockfile_present=lockfile_present)
 
-
-def environment_paths(context: InstallContext, *, scope: EnvironmentScope) -> EnvironmentPaths:
-    if scope == "global":
-        root = Path.home() / TRIVIUM_HOME_DIR / GLOBAL_DIR
-        shared_envs_dir: Path | None = None
-    else:
-        root = Path.home() / TRIVIUM_HOME_DIR / PROJECTS_DIR / _project_identifier(context.base_dir)
-        shared_envs_dir = context.base_dir / ".agents" / SHARED_ENVS_DIR
-    return EnvironmentPaths(
-        state_path=root / STATE_FILE,
-        default_dir=root / DEFAULT_DIR,
-        envs_dir=root / ENVS_DIR,
-        shared_envs_dir=shared_envs_dir,
-    )
-
-
-def _build_environment_record(paths: EnvironmentPaths, name: str, *, active: bool) -> EnvironmentRecord:
-    lockfile = _load_preferred_environment_lockfile(paths, name)
-    return EnvironmentRecord(
-        name=name,
-        active=active,
-        local=paths.env_dir(name).is_dir(),
-        shared=_shared_environment_path(paths, name) is not None,
-        skill_count=len(lockfile.skills),
-    )
-
-
-def _copy_directory(source: Path, destination: Path) -> None:
-    if destination.exists():
-        shutil.rmtree(destination)
-    if not source.exists():
-        return
-    shutil.copytree(source, destination)
-
-
-def _ensure_environment_available(context: InstallContext, name: str) -> None:
-    runtime_paths = environment_paths(context, scope=context.mode)
-    if runtime_paths.env_dir(name).is_dir():
-        return
-
-    if context.mode == "project":
-        global_paths = environment_paths(context, scope="global")
-        if global_paths.env_dir(name).is_dir():
-            _materialize_existing_environment_snapshot(global_paths.env_dir(name), runtime_paths.env_dir(name))
-            return
-    else:
-        global_paths = runtime_paths
-
-    shared_path = _shared_environment_path(runtime_paths, name)
-    if shared_path is None and context.mode == "project":
-        shared_path = _shared_environment_path(global_paths, name)
-    if shared_path is None:
+def _load_manifest(paths: EnvironmentPaths, name: str, scope: EnvironmentScope) -> LockfileData:
+    _validate_manifest_storage(paths)
+    manifest_path = paths.manifest_path(name)
+    if not manifest_path.exists():
         raise EnvironmentError(
             title="Environment Not Found",
-            lines=(f"No local or shared environment named '{name}' was found.",),
+            lines=(f"No {scope} environment named '{name}' was found.",),
             exit_code=2,
         )
-
-    try:
-        _materialize_shared_environment(context, name, shared_path)
-    except GitCloneError as error:
-        lines = [error.stderr]
-        if error.guidance is not None:
-            lines.append(error.guidance)
-        raise EnvironmentError(title="Environment Materialization Failed", lines=tuple(lines), exit_code=5) from error
-    except GitCheckoutError as error:
+    if manifest_path.is_symlink() or not manifest_path.is_file():
         raise EnvironmentError(
-            title="Environment Materialization Failed",
+            title="Invalid Environment Manifest",
+            lines=(f"The manifest at '{manifest_path}' must be a regular file.",),
+            exit_code=2,
+        )
+    manifest = load_lockfile(manifest_path, expected_mode=scope)
+    if manifest.meta.get("environment") != name:
+        raise EnvironmentError(
+            title="Invalid Environment Manifest",
+            lines=(f"The manifest at '{manifest_path}' belongs to another environment.",),
+            exit_code=2,
+        )
+    missing_hashes = sorted(name for name, entry in manifest.skills.items() if entry.content_hash is None)
+    if missing_hashes:
+        raise EnvironmentError(
+            title="Invalid Environment Manifest",
+            lines=(f"The manifest is missing content hashes for: {', '.join(missing_hashes)}.",),
+            exit_code=2,
+        )
+    return manifest
+
+
+def _load_current_manifest(paths: EnvironmentPaths, state: EnvironmentState) -> LockfileData:
+    if state.active is None or state.scope is None or state.revision is None:
+        raise AssertionError("Active state is incomplete.")
+    manifest = _load_manifest(paths, state.active, state.scope)
+    if _manifest_revision(paths.manifest_path(state.active)) != state.revision:
+        raise EnvironmentError(
+            title="Environment Changed Elsewhere",
             lines=(
-                error.stderr,
-                f"The pinned commit '{error.revision}' could not be checked out from '{error.source_url}'.",
+                f"The {state.scope} environment '{state.active}' changed after it was activated.",
+                "Deactivate and reactivate it before applying more changes.",
             ),
-        ) from error
-
-
-def _load_preferred_environment_lockfile(paths: EnvironmentPaths, name: str) -> LockfileData:
-    local_path = paths.env_dir(name) / LOCKFILE_NAME
-    if local_path.is_file():
-        return load_lockfile(local_path)
-    shared_path = _shared_environment_path(paths, name)
-    if shared_path is not None:
-        return load_lockfile(shared_path)
-    return LockfileData()
-
-
-def _load_environment_manifest(shared_path: Path) -> LockfileData:
-    return load_lockfile(shared_path)
-
-
-def _local_environment_names(paths: EnvironmentPaths) -> list[str]:
-    if not paths.envs_dir.is_dir():
-        return []
-    return sorted(child.name for child in paths.envs_dir.iterdir() if child.is_dir())
-
-
-def _materialize_shared_environment(context: InstallContext, name: str, shared_path: Path) -> None:
-    manifest = _load_environment_manifest(shared_path)
-    target_dir = environment_paths(context, scope=context.mode).env_dir(name)
-
-    with TemporaryDirectory(prefix="trivium-env-") as temp_dir_name:
-        temp_dir = Path(temp_dir_name)
-        temp_env_dir = temp_dir / name
-        temp_skills_dir = temp_env_dir / "skills"
-        temp_skills_dir.mkdir(parents=True, exist_ok=True)
-
-        grouped_entries: dict[tuple[str, str], list[tuple[str, object]]] = {}
-        for skill_name, entry in manifest.skills.items():
-            grouped_entries.setdefault((entry.source_url, entry.commit_hash), []).append((skill_name, entry))
-
-        for (source_url, commit_hash), entries in sorted(grouped_entries.items()):
-            with cloned_repo_at_revision(source_url, commit_hash) as repo_path:
-                for skill_name, entry in entries:
-                    container = repo_path if entry.skills_path == "." else repo_path / entry.skills_path  # ty:ignore[unresolved-attribute]
-                    skill_dir = container / skill_name
-                    if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
-                        raise EnvironmentError(
-                            title="Environment Materialization Failed",
-                            lines=(
-                                f"The shared environment references '{skill_name}' at '{entry.skills_path}/{skill_name}', but it was not found.",  # ty:ignore[unresolved-attribute]
-                                f"Source: {source_url} @ {commit_hash}",
-                            ),
-                        )
-                    parsed_skill, issues = validate_skill_directory(skill_dir)
-                    if issues or parsed_skill is None:
-                        issue_lines = [f"{issue.field}: {issue.rule}" for issue in issues]
-                        raise EnvironmentError(
-                            title="Environment Materialization Failed",
-                            lines=(
-                                f"The shared environment references '{skill_name}', but the pinned skill is invalid.",
-                                *issue_lines,
-                            ),
-                        )
-                    install_skill_tree(parsed_skill, temp_skills_dir / skill_name)
-
-        _write_snapshot_dir(
-            target_dir,
-            lockfile=manifest,
-            source_skills_dir=temp_skills_dir,
-            write_lockfile=True,
-            create_skills_dir=True,
-            environment_name=name,
-            mode=context.mode,
+            exit_code=2,
         )
+    return manifest
 
 
-def _project_identifier(project_root: Path) -> str:
-    return sha256(project_root.resolve().as_posix().encode("utf-8")).hexdigest()
-
-
-def _restore_snapshot(snapshot_dir: Path, context: InstallContext) -> None:
-    if not snapshot_dir.is_dir():
-        raise EnvironmentError(
-            title="Missing Environment Snapshot",
-            lines=(f"The snapshot at '{snapshot_dir}' does not exist.",),
-        )
-
-    snapshot_skills_dir = snapshot_dir / "skills"
-    if context.skills_dir.exists():
-        shutil.rmtree(context.skills_dir)
-    if snapshot_skills_dir.exists():
-        context.skills_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(snapshot_skills_dir, context.skills_dir, dirs_exist_ok=False)
-
-    snapshot_lockfile = snapshot_dir / LOCKFILE_NAME
-    if snapshot_lockfile.is_file():
-        write_lockfile(context, load_lockfile(snapshot_lockfile))
-    elif context.lockfile_path.exists():
-        context.lockfile_path.unlink()
-
-
-def _rewrite_runtime_lockfile(context: InstallContext, lockfile: LockfileData, *, environment_name: str) -> None:
+def _write_manifest(
+    manifest_path: Path,
+    lockfile: LockfileData,
+    *,
+    name: str,
+    scope: EnvironmentScope,
+) -> None:
+    manifest = LockfileData(
+        meta={key: value for key, value in lockfile.meta.items() if key != "environment"},
+        skills=dict(lockfile.skills),
+    )
     write_lockfile_path(
-        context.lockfile_path,
-        lockfile,
+        manifest_path,
+        manifest,
         meta_updates={
             "version": LOCKFILE_VERSION,
-            "mode": context.mode,
-            "environment": environment_name,
+            "mode": scope,
+            "environment": name,
             "updated_at": utc_now(),
         },
     )
 
 
-def _shared_environment_file(paths: EnvironmentPaths, name: str) -> Path | None:
-    if paths.shared_envs_dir is None:
-        return None
-    return paths.shared_envs_dir / f"{name}.lock"
+@contextmanager
+def _materialized_environment(manifest: LockfileData) -> Iterator[Path]:
+    with TemporaryDirectory(prefix="trivium-environment-") as temp_dir_name:
+        skills_dir = Path(temp_dir_name) / "skills"
+        skills_dir.mkdir()
+        grouped: dict[tuple[str, str], list[tuple[str, SkillLockEntry]]] = {}
+        for skill_name, entry in manifest.skills.items():
+            grouped.setdefault((entry.source_url, entry.commit_hash), []).append((skill_name, entry))
+        try:
+            for (source_url, commit_hash), entries in sorted(grouped.items()):
+                with cloned_repo_at_revision(source_url, commit_hash) as repo_path:
+                    for skill_name, entry in entries:
+                        container = (
+                            repo_path if entry.skills_path == "." else resolve_repo_path(repo_path, entry.skills_path)
+                        )
+                        skill_dir = None if container is None else container / skill_name
+                        if skill_dir is None or not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
+                            raise EnvironmentError(
+                                title="Environment Materialization Failed",
+                                lines=(f"The pinned skill '{skill_name}' could not be found.",),
+                            )
+                        parsed_skill, issues = validate_skill_directory(skill_dir)
+                        if parsed_skill is None or issues:
+                            raise EnvironmentError(
+                                title="Environment Materialization Failed",
+                                lines=(f"The pinned skill '{skill_name}' is invalid.",),
+                            )
+                        if (
+                            entry.content_hash is None
+                            or hash_skill_directory(
+                                parsed_skill.directory,
+                                skill_document=render_skill_document(parsed_skill.frontmatter, parsed_skill.body),
+                            )
+                            != entry.content_hash
+                        ):
+                            raise EnvironmentError(
+                                title="Environment Materialization Failed",
+                                lines=(f"The pinned skill '{skill_name}' does not match its content hash.",),
+                            )
+                        install_skill_tree(parsed_skill, skills_dir / skill_name)
+        except GitCloneError as error:
+            lines = [error.stderr]
+            if error.guidance is not None:
+                lines.append(error.guidance)
+            raise EnvironmentError(
+                title="Environment Materialization Failed",
+                lines=tuple(lines),
+                exit_code=5 if error.auth_failure else 1,
+            ) from error
+        except GitCheckoutError as error:
+            raise EnvironmentError(
+                title="Environment Materialization Failed",
+                lines=(error.stderr, f"The pinned commit '{error.revision}' is unavailable."),
+                exit_code=5,
+            ) from error
+        yield skills_dir
 
 
-def _shared_environment_names(paths: EnvironmentPaths) -> list[str]:
-    if paths.shared_envs_dir is None or not paths.shared_envs_dir.is_dir():
-        return []
-    return sorted(path.stem for path in paths.shared_envs_dir.glob("*.lock") if path.is_file())
+def _replace_runtime(
+    context: InstallContext,
+    manifest: LockfileData,
+    materialized_skills: Path,
+) -> None:
+    if context.skills_dir.is_symlink() or context.skills_dir.is_file():
+        context.skills_dir.unlink()
+    elif context.skills_dir.is_dir():
+        shutil.rmtree(context.skills_dir)
+    context.skills_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(materialized_skills, context.skills_dir)
+    runtime = LockfileData(
+        meta=dict(manifest.meta),
+        skills={
+            name: replace(entry, install_path=context.relative_install_path(name))
+            for name, entry in manifest.skills.items()
+        },
+    )
+    meta_updates: dict[str, object] = {
+        "version": LOCKFILE_VERSION,
+        "mode": context.mode,
+        "updated_at": utc_now(),
+    }
+    runtime.meta.pop("environment", None)
+    write_lockfile_path(context.lockfile_path, runtime, meta_updates=meta_updates)
 
 
-def _shared_environment_path(paths: EnvironmentPaths, name: str) -> Path | None:
-    shared_file = _shared_environment_file(paths, name)
-    if shared_file is None or not shared_file.is_file():
-        return None
-    return shared_file
+def _lockfile_entries_match(first: LockfileData, second: LockfileData) -> bool:
+    return {name: entry.to_toml_dict() for name, entry in first.skills.items()} == {
+        name: entry.to_toml_dict() for name, entry in second.skills.items()
+    }
+
+
+def _manifest_revision(manifest_path: Path) -> str:
+    return sha256(manifest_path.read_bytes()).hexdigest()
+
+
+def _validate_manifest_storage(paths: EnvironmentPaths) -> None:
+    for path in (paths.manifests_dir.parent, paths.manifests_dir):
+        if path.is_symlink():
+            raise EnvironmentError(
+                title="Unsafe Environment Storage",
+                lines=(f"The environment storage path '{path}' is a symbolic link.",),
+                exit_code=2,
+            )
+        if path.exists() and not path.is_dir():
+            raise EnvironmentError(
+                title="Unsafe Environment Storage",
+                lines=(f"The environment storage path '{path}' is not a directory.",),
+                exit_code=2,
+            )
+
+
+@contextmanager
+def _scope_lock(paths: EnvironmentPaths, scope: EnvironmentScope) -> Iterator[None]:
+    lock = exclusive_file_lock(paths.lock_path) if scope == "global" else nullcontext()
+    with lock:
+        yield
+
+
+def _write_bytes(destination: Path, content: bytes) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.name}.", delete=False) as file:
+            temporary_path = Path(file.name)
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        temporary_path.replace(destination)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
+def _restore_file(destination: Path, content: bytes | None) -> None:
+    if content is None:
+        destination.unlink(missing_ok=True)
+    else:
+        _write_bytes(destination, content)
 
 
 def _validate_or_raise(name: str) -> None:
     message = validate_environment_name(name)
-    if message is None:
-        return
-    raise EnvironmentError(title="Invalid Environment Name", lines=(message,), exit_code=2)
-
-
-def _write_environment_snapshot(
-    destination: Path,
-    *,
-    lockfile: LockfileData,
-    create_skills_dir: bool,
-    environment_name: str,
-    mode: str,
-) -> None:
-    _write_snapshot_dir(
-        destination,
-        lockfile=lockfile,
-        source_skills_dir=None,
-        write_lockfile=True,
-        create_skills_dir=create_skills_dir,
-        environment_name=environment_name,
-        mode=mode,
-    )
-
-
-def _write_shared_definition(
-    context: InstallContext,
-    *,
-    name: str,
-    lockfile: LockfileData,
-    scope: EnvironmentScope,
-) -> None:
-    paths = environment_paths(context, scope=scope)
-    shared_path = _shared_environment_file(paths, name)
-    if shared_path is None:
-        raise EnvironmentError(
-            title="Shared Environments Unsupported",
-            lines=("Shared environments are only available in project mode.",),
-            exit_code=2,
-        )
-
-    write_lockfile_path(
-        shared_path,
-        lockfile,
-        meta_updates={
-            "version": LOCKFILE_VERSION,
-            "mode": context.mode,
-            "environment": name,
-            "shared": True,
-            "updated_at": utc_now(),
-        },
-    )
-
-
-def _materialize_existing_environment_snapshot(source: Path, destination: Path) -> None:
-    _copy_directory(source, destination)
-
-
-def _project_capture_context(context: InstallContext) -> InstallContext:
-    if context.mode == "project":
-        return context
-
-    current = Path.cwd().resolve()
-    project_root = current
-    for candidate in (current, *current.parents):
-        if (candidate / ".git").exists():
-            project_root = candidate
-            break
-
-    install_prefix = Path(".agents") / "skills"
-    return InstallContext(
-        mode="project",
-        base_dir=project_root,
-        skills_dir=project_root / install_prefix,
-        lockfile_path=project_root / LOCKFILE_NAME,
-        install_prefix=install_prefix,
-    )
-
-
-def _write_snapshot_dir(
-    destination: Path,
-    *,
-    lockfile: LockfileData,
-    source_skills_dir: Path | None,
-    write_lockfile: bool,
-    create_skills_dir: bool,
-    environment_name: str | None,
-    mode: str,
-) -> None:
-    if destination.exists():
-        shutil.rmtree(destination)
-    destination.mkdir(parents=True, exist_ok=True)
-
-    if create_skills_dir:
-        (destination / "skills").mkdir(parents=True, exist_ok=True)
-    if source_skills_dir is not None and source_skills_dir.exists():
-        _copy_directory(source_skills_dir, destination / "skills")
-
-    if write_lockfile:
-        meta_updates = {
-            "version": LOCKFILE_VERSION,
-            "mode": mode,
-            "updated_at": utc_now(),
-        }
-        if environment_name is not None:
-            meta_updates["environment"] = environment_name
-        write_lockfile_path(destination / LOCKFILE_NAME, lockfile, meta_updates=meta_updates)
+    if message is not None:
+        raise EnvironmentError(title="Invalid Environment Name", lines=(message,), exit_code=2)
